@@ -22,6 +22,8 @@ from email import policy
 from email.utils import parseaddr
 from urllib.parse import urlparse
 import anthropic
+from bs4 import BeautifulSoup
+from confusable_homoglyphs import confusables
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -127,21 +129,27 @@ def parse_email(msg):
     auth_results = msg.get("Authentication-Results", "")
 
     body = ""
+    html_body = ""
     if msg.is_multipart():
         for part in msg.walk():
-            if part.get_content_type() == "text/plain":
+            ct = part.get_content_type()
+            if ct == "text/plain" and not body:
                 body = part.get_content()
-                break
-        if not body:
-            for part in msg.walk():
-                if part.get_content_type() == "text/html":
-                    html = part.get_content()
-                    body = re.sub(r"<[^>]+>", " ", html)
-                    break
+            elif ct == "text/html" and not html_body:
+                html_body = part.get_content()
     else:
-        body = msg.get_content() if msg.get_content_maintype() == "text" else ""
+        ct = msg.get_content_type()
+        if ct == "text/plain":
+            body = msg.get_content()
+        elif ct == "text/html":
+            html_body = msg.get_content()
+
+    # If we only have HTML, derive a text version for the prompt
+    if not body and html_body:
+        body = re.sub(r"<[^>]+>", " ", html_body)
 
     body = (body or "").strip()[:8000]
+    html_body = (html_body or "").strip()[:50000]
 
     urls = list(set(URL_RE.findall(body)))
 
@@ -155,9 +163,55 @@ def parse_email(msg):
         "auth_results": auth_results,
         "received_chain": msg.get_all("Received", [])[:5],
         "body": body,
+        "html_body": html_body,
         "urls": urls[:20],
     }
 
+def extract_link_mismatches(html_body):
+    """Find <a> tags where anchor text resembles a domain but href points elsewhere.
+
+    Classic phishing pattern: <a href="http://evil.example/login">paypal.com</a>
+    Legitimate marketing email almost never does this; phishing kits do it constantly.
+    Only flag when anchor text actually looks like a domain (contains a dot, no spaces).
+    """
+    if not html_body:
+        return []
+    try:
+        soup = BeautifulSoup(html_body, "html.parser")
+    except Exception:
+        return []
+
+    mismatches = []
+    for a in soup.find_all("a", href=True):
+        href = (a.get("href") or "").strip()
+        if not href.startswith(("http://", "https://")):
+            continue
+
+        anchor_text = a.get_text().strip()
+        # Plain anchors like "Click here" or "Login" don't qualify - too noisy.
+        # Only interested when the visible text itself looks like a hostname.
+        if not anchor_text or " " in anchor_text or "." not in anchor_text:
+            continue
+
+        href_host = (urlparse(href).hostname or "").lower()
+        if not href_host:
+            continue
+
+        # Normalize the anchor text to compare against the actual href hostname
+        anchor_host = anchor_text.lower()
+        for prefix in ("https://", "http://"):
+            if anchor_host.startswith(prefix):
+                anchor_host = anchor_host[len(prefix):]
+        anchor_host = anchor_host.split("/")[0]
+
+        if anchor_host and anchor_host != href_host:
+            mismatches.append({
+                "anchor_text": anchor_text[:200],
+                "actual_host": href_host,
+                "severity": "HIGH",
+            })
+
+    return mismatches
 
 def enrich(parsed):
     """Deterministic signals - cheap, reliable, weight heavily in the verdict.
@@ -235,12 +289,22 @@ def enrich(parsed):
     if suspicious_urls:
         signals.append(("urls", f"Suspicious URLs: {', '.join(suspicious_urls[:5])}"))
 
+    # Link mismatch detection: anchor text resembling a brand domain but href elsewhere
+    link_mismatches = extract_link_mismatches(parsed.get("html_body", ""))
+    if link_mismatches:
+        examples = "; ".join(
+            f"'{m['anchor_text']}' -> {m['actual_host']}" for m in link_mismatches[:3]
+        )
+        signals.append(("link_mismatch",
+                        f"Anchor text resembles a domain but link goes elsewhere: {examples}"))
+
     return {
         "signals": signals,
         "dmarc": "pass" if dmarc_pass else ("fail" if dmarc_fail else "none"),
         "dkim": "pass" if dkim_pass else ("fail" if dkim_fail else "none"),
         "spf":  "pass" if spf_pass  else ("fail" if spf_fail  else "none"),
         "dmarc_policy": "reject" if dmarc_reject_policy else ("quarantine" if dmarc_quarantine_policy else "none"),
+        "link_mismatches": link_mismatches,
     }
 
 
