@@ -14,12 +14,17 @@ Env vars expected:
 import os
 import re
 import json
+import time
 import email
+import logging
 import boto3
 from email import policy
 from email.utils import parseaddr
 from urllib.parse import urlparse
 import anthropic
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
 
 s3 = boto3.client("s3")
 ses = boto3.client("ses", region_name=os.environ.get("REGION", "us-east-1"))
@@ -49,6 +54,8 @@ def lambda_handler(event, context):
     parsed = parse_email(target)
     enrichment = enrich(parsed)
     verdict = analyze_with_claude(parsed, enrichment)
+
+    log_verdict(parsed, enrichment, verdict, message_id)
 
     reply_body = format_reply(verdict, parsed, enrichment)
     send_reply(to=sender, subject=f"Re: {submission.get('Subject', 'phishing check')}",
@@ -228,7 +235,13 @@ def enrich(parsed):
     if suspicious_urls:
         signals.append(("urls", f"Suspicious URLs: {', '.join(suspicious_urls[:5])}"))
 
-    return {"signals": signals}
+    return {
+        "signals": signals,
+        "dmarc": "pass" if dmarc_pass else ("fail" if dmarc_fail else "none"),
+        "dkim": "pass" if dkim_pass else ("fail" if dkim_fail else "none"),
+        "spf":  "pass" if spf_pass  else ("fail" if spf_fail  else "none"),
+        "dmarc_policy": "reject" if dmarc_reject_policy else ("quarantine" if dmarc_quarantine_policy else "none"),
+    }
 
 
 def analyze_with_claude(parsed, enrichment):
@@ -384,6 +397,32 @@ Authoritative threats should be reported to your IT/security team. Do not
 forward emails containing personal data you wouldn't want analyzed by an AI.
 """
 
+def log_verdict(parsed, enrichment, verdict, message_id):
+    """One structured JSON log line per verdict for CloudWatch Insights."""
+    try:
+        return_path_domain = ""
+        rp = parsed.get("return_path") or ""
+        if "@" in rp:
+            return_path_domain = rp.split("@")[-1].lower()
+
+        payload = {
+            "event": "verdict",
+            "ts": int(time.time()),
+            "message_id": message_id,
+            "sender_domain": parsed.get("from_domain"),
+            "return_path_domain": return_path_domain,
+            "spf": enrichment.get("spf"),
+            "dkim": enrichment.get("dkim"),
+            "dmarc": enrichment.get("dmarc"),
+            "dmarc_policy": enrichment.get("dmarc_policy"),
+            "url_count": len(parsed.get("urls") or []),
+            "verdict": verdict.get("verdict"),
+            "confidence": verdict.get("confidence"),
+            "indicator_count": len(verdict.get("indicators") or []),
+        }
+        logger.info(json.dumps(payload, default=str))
+    except Exception as e:
+        logger.warning(f"log_verdict_failed: {e}")
 
 def send_reply(to, subject, body):
     ses.send_email(
