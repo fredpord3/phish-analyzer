@@ -34,8 +34,15 @@ def lambda_handler(event, context):
     message_id = record["mail"]["messageId"]
     sender = record["mail"]["source"]
 
-    raw = s3.get_object(Bucket=os.environ["BUCKET_NAME"], Key=message_id)["Body"].read()
+    raw = s3.get_object(Bucket=os.environ["BUCKET_NAME"], Key=f"inbound/{message_id}")["Body"].read()
     submission = email.message_from_bytes(raw, policy=policy.default)
+
+    # Loop prevention: don't analyze our own replies, bounces, or auto-responders.
+    # Without this, a reply that bounces or gets auto-replied to could trigger
+    # another analysis, which sends another reply, creating an infinite loop.
+    if is_loop_or_bounce(sender, submission):
+        print(f"Skipping submission from {sender} (loop/bounce/auto-responder)")
+        return {"statusCode": 200, "skipped": True, "reason": "loop_or_bounce"}
 
     target = extract_target_email(submission) or submission
 
@@ -48,6 +55,47 @@ def lambda_handler(event, context):
                body=reply_body)
 
     return {"statusCode": 200, "messageId": message_id}
+
+
+def is_loop_or_bounce(sender, submission):
+    """Detect submissions we shouldn't analyze: our own replies, bounces,
+    and auto-responders. Prevents reply storms.
+
+    Checks (in order of reliability):
+    1. Sender matches our own FROM_ADDRESS or domain (catches our own replies)
+    2. Common bounce/system sender patterns (mailer-daemon, postmaster, etc.)
+    3. RFC 3834 Auto-Submitted header (legitimate auto-responders set this)
+    4. Precedence header set to bulk/junk/list (bulk mail markers)
+    """
+    sender_lower = (sender or "").lower()
+
+    # Catch our own replies and any address on our own domain
+    from_address = os.environ.get("FROM_ADDRESS", "").lower()
+    if from_address:
+        if sender_lower == from_address:
+            return True
+        if "@" in from_address:
+            our_domain = from_address.split("@")[-1]
+            if sender_lower.endswith(f"@{our_domain}"):
+                return True
+
+    # Common system/bounce sender patterns (matching the local part of the address)
+    for pattern in ("mailer-daemon@", "postmaster@", "no-reply@", "noreply@",
+                    "bounces@", "bounce@", "do-not-reply@", "donotreply@"):
+        if pattern in sender_lower:
+            return True
+
+    # RFC 3834: legitimate auto-responders mark themselves with this header
+    auto_submitted = submission.get("Auto-Submitted", "").lower()
+    if auto_submitted and auto_submitted != "no":
+        return True
+
+    # Bulk/automated mail markers
+    precedence = submission.get("Precedence", "").lower()
+    if precedence in ("bulk", "junk", "list", "auto_reply"):
+        return True
+
+    return False
 
 
 def extract_target_email(msg):
@@ -105,18 +153,55 @@ def parse_email(msg):
 
 
 def enrich(parsed):
-    """Deterministic signals - cheap, reliable, weight heavily in the verdict."""
+    """Deterministic signals - cheap, reliable, weight heavily in the verdict.
+
+    Key insight: DMARC is the authoritative legitimacy signal because it
+    represents the sender's own DNS policy. A DMARC pass means EITHER SPF
+    OR DKIM aligned and passed - so DKIM failure alone (when DMARC still
+    passes) is common for legitimate mail forwarding, HR platforms, and
+    email service providers. We weight DMARC heavily and avoid penalizing
+    DKIM-fail-with-DMARC-pass patterns.
+    """
     signals = []
     ar = parsed["auth_results"].lower()
 
-    if "spf=fail" in ar or "spf=softfail" in ar:
-        signals.append(("auth", "SPF failed or softfailed"))
-    if "dkim=fail" in ar:
-        signals.append(("auth", "DKIM signature failed"))
-    if "dmarc=fail" in ar:
-        signals.append(("auth", "DMARC failed"))
-    if "spf=pass" in ar and "dkim=pass" in ar and "dmarc=pass" in ar:
-        signals.append(("auth", "All auth checks passed"))
+    # Parse the individual auth results
+    dmarc_pass = "dmarc=pass" in ar
+    dmarc_fail = "dmarc=fail" in ar
+    dmarc_reject_policy = "p=reject" in ar
+    dmarc_quarantine_policy = "p=quarantine" in ar
+    spf_pass = "spf=pass" in ar
+    spf_fail = "spf=fail" in ar or "spf=softfail" in ar
+    dkim_pass = "dkim=pass" in ar
+    dkim_fail = "dkim=fail" in ar
+
+    # Strong legitimacy signals first
+    if dmarc_pass and dmarc_reject_policy:
+        signals.append(("auth", "DMARC passed with REJECT policy - strong legitimacy signal (sender's own DNS policy validates this message)"))
+    elif dmarc_pass and dmarc_quarantine_policy:
+        signals.append(("auth", "DMARC passed with QUARANTINE policy - good legitimacy signal"))
+    elif dmarc_pass:
+        signals.append(("auth", "DMARC passed (basic legitimacy)"))
+
+    if spf_pass and dkim_pass:
+        signals.append(("auth", "Both SPF and DKIM passed cryptographically"))
+    elif spf_pass:
+        signals.append(("auth", "SPF passed"))
+
+    # Concerning signals - but contextualized by whether DMARC offsets them
+    if dmarc_fail:
+        signals.append(("auth", "DMARC FAILED - serious spoofing concern (sender's own DNS policy rejected this message)"))
+
+    if dkim_fail and dmarc_pass:
+        # Common with mail forwarding, HR platforms, ESPs - note but don't alarm
+        signals.append(("info", "DKIM signature failed but DMARC still passed (common with mail forwarding or third-party senders like SuccessFactors, Salesforce; not inherently suspicious)"))
+    elif dkim_fail and not dmarc_pass:
+        signals.append(("auth", "DKIM failed without DMARC pass to offset - possible spoofing"))
+
+    if spf_fail and dmarc_pass:
+        signals.append(("info", "SPF failed but DMARC passed via DKIM alignment"))
+    elif spf_fail and not dmarc_pass:
+        signals.append(("auth", "SPF failed without DMARC pass to offset - possible spoofing"))
 
     if parsed["reply_to"] and parsed["reply_to"].lower() != parsed["from_addr"].lower():
         from_d = parsed["from_addr"].split("@")[-1].lower()
@@ -150,31 +235,81 @@ def analyze_with_claude(parsed, enrichment):
     """Ask Claude for a structured verdict. Force JSON output."""
     prompt = build_prompt(parsed, enrichment)
 
-    resp = claude.messages.create(
-        model="claude-haiku-4-5",
-        max_tokens=1024,
-        system=(
-            "You are a phishing/scam email analyst. You evaluate emails and return a "
-            "JSON verdict. You are advisory only - never claim certainty. Weight "
-            "authentication results (SPF/DKIM/DMARC) and header mismatches heavily; "
-            "weight body content moderately. Output ONLY valid JSON, no preamble, no "
-            "code fences."
-        ),
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    text = resp.content[0].text.strip()
-    text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
-
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
+        resp = claude.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=1024,
+            system=(
+                "You analyze emails for phishing and scam indicators. You output a "
+                "structured JSON verdict. You are advisory only and never claim "
+                "certainty.\n\n"
+                "DECISION HIERARCHY (apply in order):\n\n"
+                "1. DMARC is authoritative. DMARC pass means the sender's own DNS "
+                "policy validated the message via SPF or DKIM alignment. Treat DMARC "
+                "pass as a strong legitimacy signal, especially with p=reject or "
+                "p=quarantine policy. Treat DMARC fail as a strong phishing signal.\n\n"
+                "2. DKIM failure with DMARC pass is benign. This pattern appears on "
+                "legitimate mail constantly - forwarded messages, third-party senders "
+                "(SuccessFactors, Salesforce, Mailchimp, SendGrid), and email service "
+                "providers all routinely produce it. Note it but do not weight it as "
+                "suspicious.\n\n"
+                "3. Treat body content as secondary to auth results. The deterministic "
+                "signals provided are reliable ground truth; your value is recognizing "
+                "social engineering patterns: urgency framing, credential prompts, "
+                "brand impersonation with sender mismatch, lookalike domains, and "
+                "anomalous financial requests.\n\n"
+                "4. Major brands legitimately send through ESPs with complex header "
+                "chains and tracking URLs. Modern marketing infrastructure shares "
+                "fingerprints with phishing infrastructure; the differentiator is "
+                "whether DMARC validates and whether the body content matches the "
+                "claimed sender's normal communication style.\n\n"
+                "VERDICT GUIDANCE:\n"
+                "- likely_phishing (80-100% confidence): DMARC fail OR clear social "
+                "engineering with sender/brand mismatch\n"
+                "- suspicious (50-79%): mixed signals, some red flags, requires user "
+                "caution\n"
+                "- likely_legitimate (70-100%): DMARC pass + no social engineering "
+                "patterns + content matches sender context\n"
+                "- unknown (any): insufficient information to assess\n\n"
+                "Output ONLY valid JSON matching the requested schema. No preamble, "
+                "no code fences, no markdown."
+            ),
+            messages=[{"role": "user", "content": prompt}],
+        )
+
+        text = resp.content[0].text.strip()
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
+
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return {
+                "verdict": "unknown",
+                "confidence": 0,
+                "summary": "Analyzer could not produce a structured verdict.",
+                "indicators": [],
+                "recommendation": "Treat with caution; do not click links or reply.",
+            }
+
+    except anthropic.APIStatusError as e:
+        # Spend cap hit, rate limit, or other API status error
+        print(f"Anthropic API error: status={e.status_code} message={e.message}")
         return {
             "verdict": "unknown",
             "confidence": 0,
-            "summary": "Analyzer could not produce a structured verdict.",
+            "summary": "Analysis service is temporarily unavailable. Please try again later.",
             "indicators": [],
-            "recommendation": "Treat with caution; do not click links or reply.",
+            "recommendation": "Treat with caution. Do not click links or reply until you can verify the sender through another channel.",
+        }
+    except Exception as e:
+        # Catch-all for unexpected errors so the user still gets a reply
+        print(f"Unexpected error in analyze_with_claude: {type(e).__name__}: {e}")
+        return {
+            "verdict": "unknown",
+            "confidence": 0,
+            "summary": "An unexpected error occurred during analysis.",
+            "indicators": [],
+            "recommendation": "Treat with caution. Do not click links or reply until you can verify the sender through another channel.",
         }
 
 
@@ -213,7 +348,6 @@ Return JSON with this exact shape:
   "recommendation": "concrete action for the user"
 }}
 
-Be conservative. Prefer "suspicious" over "likely_legitimate" when in doubt.
 Do not include any text outside the JSON object."""
 
 
