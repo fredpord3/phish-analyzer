@@ -34,6 +34,14 @@ claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
+# Brands worth checking for lookalike/homoglyph impersonation.
+# Tune to your threat model - add the brands your users actually interact with.
+WATCHED_BRANDS = [
+    "microsoft.com", "google.com", "apple.com", "amazon.com",
+    "paypal.com", "chase.com", "bankofamerica.com", "wellsfargo.com",
+    "docusign.com", "dropbox.com",
+]
+
 
 def lambda_handler(event, context):
     # SES action triggers Lambda with the S3 object key for the raw email.
@@ -48,7 +56,7 @@ def lambda_handler(event, context):
     # Without this, a reply that bounces or gets auto-replied to could trigger
     # another analysis, which sends another reply, creating an infinite loop.
     if is_loop_or_bounce(sender, submission):
-        print(f"Skipping submission from {sender} (loop/bounce/auto-responder)")
+        logger.info("Skipping submission from %s (loop/bounce/auto-responder)", sender)
         return {"statusCode": 200, "skipped": True, "reason": "loop_or_bounce"}
 
     target = extract_target_email(submission) or submission
@@ -72,9 +80,14 @@ def is_loop_or_bounce(sender, submission):
 
     Checks (in order of reliability):
     1. Sender matches our own FROM_ADDRESS or domain (catches our own replies)
-    2. Common bounce/system sender patterns (mailer-daemon, postmaster, etc.)
+    2. True bounce/system sender patterns (mailer-daemon, postmaster, bounces)
     3. RFC 3834 Auto-Submitted header (legitimate auto-responders set this)
     4. Precedence header set to bulk/junk/list (bulk mail markers)
+
+    Intentionally does NOT block "no-reply@" / "noreply@" / "donotreply@" -
+    those are extremely common legitimate transactional sender patterns
+    (banks, SaaS, airlines). Blocking them prevents the analyzer from ever
+    seeing the very emails users most often want analyzed.
     """
     sender_lower = (sender or "").lower()
 
@@ -88,9 +101,9 @@ def is_loop_or_bounce(sender, submission):
             if sender_lower.endswith(f"@{our_domain}"):
                 return True
 
-    # Common system/bounce sender patterns (matching the local part of the address)
-    for pattern in ("mailer-daemon@", "postmaster@", "no-reply@", "noreply@",
-                    "bounces@", "bounce@", "do-not-reply@", "donotreply@"):
+    # True bounce/system sender patterns only. noreply variants are NOT
+    # included here - see docstring.
+    for pattern in ("mailer-daemon@", "postmaster@", "bounces@", "bounce@"):
         if pattern in sender_lower:
             return True
 
@@ -151,7 +164,20 @@ def parse_email(msg):
     body = (body or "").strip()[:8000]
     html_body = (html_body or "").strip()[:50000]
 
-    urls = list(set(URL_RE.findall(body)))
+    # Pull URLs from both the text body and HTML hrefs. HTML-only emails
+    # (most marketing mail, lots of phishing kits) hide their real targets
+    # in <a href="..."> tags that the text-body regex never sees.
+    urls = set(URL_RE.findall(body))
+    if html_body:
+        try:
+            soup = BeautifulSoup(html_body, "html.parser")
+            for a in soup.find_all("a", href=True):
+                href = (a.get("href") or "").strip()
+                if href.startswith(("http://", "https://")):
+                    urls.add(href)
+        except Exception as e:
+            logger.warning("html_url_extraction_failed: %s", e)
+    urls = list(urls)[:20]
 
     return {
         "from_name": from_name,
@@ -164,8 +190,9 @@ def parse_email(msg):
         "received_chain": msg.get_all("Received", [])[:5],
         "body": body,
         "html_body": html_body,
-        "urls": urls[:20],
+        "urls": urls,
     }
+
 
 def extract_link_mismatches(html_body):
     """Find <a> tags where anchor text resembles a domain but href points elsewhere.
@@ -212,6 +239,27 @@ def extract_link_mismatches(html_body):
             })
 
     return mismatches
+
+
+def detect_lookalike_domain(from_domain):
+    """Check if from_domain is a homoglyph/confusable of a watched brand.
+
+    Catches Unicode lookalike attacks (e.g. 'paypa1.com', 'micr0soft.com',
+    or Cyrillic 'а' substituted for Latin 'a'). Exact matches against the
+    watched brand list are returned as None - those are the real thing.
+    """
+    if not from_domain:
+        return None
+    for brand in WATCHED_BRANDS:
+        if from_domain == brand:
+            return None  # exact match, legitimate
+        try:
+            if confusables.is_confusable(from_domain, greedy=True, preferred_aliases=[brand]):
+                return {"suspect": from_domain, "resembles": brand}
+        except Exception:
+            continue
+    return None
+
 
 def enrich(parsed):
     """Deterministic signals - cheap, reliable, weight heavily in the verdict.
@@ -289,6 +337,12 @@ def enrich(parsed):
     if suspicious_urls:
         signals.append(("urls", f"Suspicious URLs: {', '.join(suspicious_urls[:5])}"))
 
+    # Lookalike domain detection: sender domain that visually resembles a watched brand
+    lookalike = detect_lookalike_domain(parsed["from_domain"])
+    if lookalike:
+        signals.append(("lookalike",
+                        f"Sender domain '{lookalike['suspect']}' visually resembles watched brand '{lookalike['resembles']}' - possible homoglyph impersonation"))
+
     # Link mismatch detection: anchor text resembling a brand domain but href elsewhere
     link_mismatches = extract_link_mismatches(parsed.get("html_body", ""))
     if link_mismatches:
@@ -305,6 +359,7 @@ def enrich(parsed):
         "spf":  "pass" if spf_pass  else ("fail" if spf_fail  else "none"),
         "dmarc_policy": "reject" if dmarc_reject_policy else ("quarantine" if dmarc_quarantine_policy else "none"),
         "link_mismatches": link_mismatches,
+        "lookalike": lookalike,
     }
 
 
@@ -370,7 +425,7 @@ def analyze_with_claude(parsed, enrichment):
 
     except anthropic.APIStatusError as e:
         # Spend cap hit, rate limit, or other API status error
-        print(f"Anthropic API error: status={e.status_code} message={e.message}")
+        logger.error("Anthropic API error: status=%s message=%s", e.status_code, e.message)
         return {
             "verdict": "unknown",
             "confidence": 0,
@@ -378,9 +433,10 @@ def analyze_with_claude(parsed, enrichment):
             "indicators": [],
             "recommendation": "Treat with caution. Do not click links or reply until you can verify the sender through another channel.",
         }
-    except Exception as e:
-        # Catch-all for unexpected errors so the user still gets a reply
-        print(f"Unexpected error in analyze_with_claude: {type(e).__name__}: {e}")
+    except Exception:
+        # Catch-all for unexpected errors so the user still gets a reply.
+        # logger.exception captures the traceback automatically.
+        logger.exception("Unexpected error in analyze_with_claude")
         return {
             "verdict": "unknown",
             "confidence": 0,
@@ -461,6 +517,7 @@ Authoritative threats should be reported to your IT/security team. Do not
 forward emails containing personal data you wouldn't want analyzed by an AI.
 """
 
+
 def log_verdict(parsed, enrichment, verdict, message_id):
     """One structured JSON log line per verdict for CloudWatch Insights."""
     try:
@@ -468,6 +525,8 @@ def log_verdict(parsed, enrichment, verdict, message_id):
         rp = parsed.get("return_path") or ""
         if "@" in rp:
             return_path_domain = rp.split("@")[-1].lower()
+
+        lookalike = enrichment.get("lookalike") or {}
 
         payload = {
             "event": "verdict",
@@ -480,13 +539,16 @@ def log_verdict(parsed, enrichment, verdict, message_id):
             "dmarc": enrichment.get("dmarc"),
             "dmarc_policy": enrichment.get("dmarc_policy"),
             "url_count": len(parsed.get("urls") or []),
+            "link_mismatch_count": len(enrichment.get("link_mismatches") or []),
+            "lookalike_brand": lookalike.get("resembles"),
             "verdict": verdict.get("verdict"),
             "confidence": verdict.get("confidence"),
             "indicator_count": len(verdict.get("indicators") or []),
         }
         logger.info(json.dumps(payload, default=str))
     except Exception as e:
-        logger.warning(f"log_verdict_failed: {e}")
+        logger.warning("log_verdict_failed: %s", e)
+
 
 def send_reply(to, subject, body):
     ses.send_email(
