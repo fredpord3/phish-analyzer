@@ -32,6 +32,12 @@ s3 = boto3.client("s3")
 ses = boto3.client("ses", region_name=os.environ.get("REGION", "us-east-1"))
 claude = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
 
+dynamodb = boto3.resource("dynamodb", region_name=os.environ.get("REGION", "us-east-1"))
+rate_limit_table = dynamodb.Table("phish-analyzer-rate-limits")
+
+RATE_LIMIT_PER_HOUR = 10
+RATE_LIMIT_WINDOW_SECONDS = 3600
+
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
 # Brands worth checking for lookalike/homoglyph impersonation.
@@ -58,6 +64,15 @@ def lambda_handler(event, context):
     if is_loop_or_bounce(sender, submission):
         logger.info("Skipping submission from %s (loop/bounce/auto-responder)", sender)
         return {"statusCode": 200, "skipped": True, "reason": "loop_or_bounce"}
+
+    # Rate limiting: cap how many analyses a single sender can trigger per hour.
+    # Runs before any parsing, enrichment, or Claude call, so an abusive volume
+    # never incurs API cost. Rate-limited senders are dropped silently (no reply),
+    # consistent with the loop/bounce handling above - a bounce reply would itself
+    # be a new abuse vector.
+    if not check_rate_limit(sender):
+        logger.info("Rate limit exceeded for %s - dropping without reply", sender)
+        return {"statusCode": 200, "skipped": True, "reason": "rate_limited"}
 
     target = extract_target_email(submission) or submission
 
@@ -118,6 +133,37 @@ def is_loop_or_bounce(sender, submission):
         return True
 
     return False
+
+
+def check_rate_limit(sender_email):
+    """Returns True if sender is under the hourly limit, False if they should be dropped.
+
+    Uses a single atomic DynamoDB UpdateItem with an ADD counter, keyed by
+    sender + fixed hourly bucket. TTL on the item auto-expires old windows,
+    so there's no separate reset logic to maintain.
+
+    Fails open (allows the email through) if DynamoDB itself errors, so a
+    transient AWS issue never silently blocks legitimate mail - but it logs
+    loudly when that happens so it shows up in CloudWatch.
+    """
+    sender_email = (sender_email or "").strip().lower()
+    now = int(time.time())
+    hour_bucket = now // RATE_LIMIT_WINDOW_SECONDS
+    pk = f"{sender_email}#{hour_bucket}"
+    expires_at = now + RATE_LIMIT_WINDOW_SECONDS + 60
+
+    try:
+        response = rate_limit_table.update_item(
+            Key={"pk": pk},
+            UpdateExpression="ADD request_count :incr SET expires_at = if_not_exists(expires_at, :ttl)",
+            ExpressionAttributeValues={":incr": 1, ":ttl": expires_at},
+            ReturnValues="UPDATED_NEW",
+        )
+        current_count = response["Attributes"]["request_count"]
+        return current_count <= RATE_LIMIT_PER_HOUR
+    except Exception as e:
+        logger.error("rate_limit_check_failed sender=%s error=%s", sender_email, e)
+        return True
 
 
 def extract_target_email(msg):
