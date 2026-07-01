@@ -12,7 +12,8 @@ flowchart LR
     B --> C[S3 raw email]
     B --> D[Lambda - Python 3.13]
     C --> D
-    D --> E[Parse + enrich headers]
+    D --> R[Rate limit check - DynamoDB]
+    R --> E[Parse + enrich headers]
     E --> F[Claude Haiku 4.5]
     F --> G[Structured JSON verdict]
     G --> H[SES Outbound reply]
@@ -25,16 +26,18 @@ flowchart LR
 2. Amazon SES receives the message and writes the raw RFC 822 source to S3 under the `inbound/` prefix.
 3. SES triggers Lambda with message metadata; Lambda pulls the source from S3.
 4. Lambda runs loop/bounce detection to reject its own replies, mailer-daemon bounces, RFC 3834 auto-responders, and bulk-mail markers before any analysis happens.
-5. Lambda extracts deterministic signals: SPF/DKIM/DMARC results from the Authentication-Results header (with DMARC treated as the senior signal), From vs Return-Path vs Reply-To alignment, URLs from both text and HTML parts, anchor-text-vs-href link mismatches, and homoglyph/confusable lookalikes against a watchlist of commonly-impersonated brands.
-6. Lambda passes parsed content and enriched signals to Claude with a structured prompt that defines a verdict hierarchy and explicitly handles ESP scenarios.
-7. Claude returns JSON with a verdict tier, a 0-100 confidence score, indicators of compromise, and a user-facing explanation.
-8. Lambda writes one structured JSON log line per verdict to CloudWatch (for Insights queries and future SIEM ingestion) and formats the verdict into an email reply sent back via SES.
+5. Lambda enforces a per-sender rate limit backed by DynamoDB. Senders over the hourly cap are dropped silently before any parsing, enrichment, or model call, so abusive volume never incurs API cost.
+6. Lambda extracts deterministic signals: SPF/DKIM/DMARC results from the Authentication-Results header (with DMARC treated as the senior signal), From vs Return-Path vs Reply-To alignment, URLs from both text and HTML parts, anchor-text-vs-href link mismatches, and homoglyph/confusable lookalikes against a watchlist of commonly-impersonated brands.
+7. Lambda passes parsed content and enriched signals to Claude with a structured prompt that defines a verdict hierarchy and explicitly handles ESP scenarios.
+8. Claude returns JSON with a verdict tier, a 0-100 confidence score, indicators of compromise, and a user-facing explanation.
+9. Lambda writes one structured JSON log line per verdict to CloudWatch (for Insights queries and future SIEM ingestion) and formats the verdict into an email reply sent back via SES.
 
 ## Tech stack
 
 - AWS Lambda (Python 3.13) for serverless compute
 - Amazon SES for inbound mail receiving and outbound replies
 - Amazon S3 for raw email storage
+- Amazon DynamoDB for per-sender rate-limit counters with TTL-based expiry
 - CloudWatch Logs for structured verdict telemetry
 - Anthropic Claude (Haiku 4.5) for content analysis
 - BeautifulSoup for HTML parsing (URL extraction, link-mismatch detection)
@@ -70,6 +73,16 @@ Free-form output is unparseable at scale. Structured output lets the same verdic
 ### Why DMARC is the senior signal
 
 A DMARC pass means the sender's own DNS policy validated the message via SPF or DKIM alignment. That makes DMARC outcome the authoritative legitimacy signal — stronger than raw SPF or DKIM results in isolation. DKIM failure with DMARC pass is benign and routine for forwarded mail, HR platforms, marketing ESPs, and any third-party sender. The enrichment scoring and the model's system prompt both encode this hierarchy explicitly to prevent the false-positive class described in the case studies below.
+
+### Why a fixed-window DynamoDB counter for rate limiting?
+
+The rate limiter uses a single atomic `UpdateItem` with an `ADD` expression, keyed by sender plus a fixed hourly time bucket (`sender@example.com#495257`). This was chosen over a sliding window or a read-then-write counter for three reasons:
+
+- **No race conditions.** The counter increment and read happen in one atomic operation, so concurrent Lambda invocations for the same sender cannot clobber each other's count.
+- **No reset logic to maintain.** Because the time bucket is baked into the partition key, each hour gets its own row. DynamoDB TTL expires old rows automatically, so there is no scheduled cleanup job and no stale-counter drift.
+- **Fail-open on infrastructure errors.** If the DynamoDB call itself throws (throttling, transient AWS issue), the check allows the email through and logs the error loudly to CloudWatch. Fail-closed would mean a DynamoDB blip silently drops legitimate mail, which is the worse failure for a tool whose whole value is answering the user.
+
+Rate-limited senders are dropped silently with no reply, the same policy as loop/bounce handling — a bounce or rejection reply to a high-volume sender would itself be a new abuse vector. The counter keys on the SMTP envelope sender (what SES actually observed); defeating a sender that rotates its envelope address would require per-IP or global limits, which is deliberately out of scope at this stage.
 
 ## Verdict telemetry
 
@@ -130,6 +143,7 @@ Early loop-prevention logic dropped any submission whose sender local-part match
 ## Security and cost controls
 
 - IAM scoped to least privilege; deny policy blocks EC2, Bedrock, SageMaker, and other compute services unrelated to the function's purpose
+- Per-sender rate limiting (DynamoDB atomic counter with TTL expiry) caps how many analyses a single sender can trigger per hour; the check runs before any model call so abusive volume incurs no API cost, and fails open on infrastructure errors so a DynamoDB blip never silently drops legitimate mail
 - Anthropic API spend capped at $10 per month with alerts at $6 and $8
 - AWS budgets at $0.01 (zero-spend tripwire) and $5 (operational ceiling) with email alerts
 - All credentials live in Lambda environment variables; nothing in source
@@ -139,7 +153,7 @@ Early loop-prevention logic dropped any submission whose sender local-part match
 
 ## Status
 
-MVP complete and deployed. Currently running in SES sandbox (recipient address whitelist) pending rate limiting work before requesting production access.
+MVP complete and deployed. Rate limiting is live; requesting SES production access is the next step to lift the sandbox recipient whitelist.
 
 **What's done**
 - Core SES → S3 → Lambda → Claude → SES reply pipeline
@@ -149,15 +163,15 @@ MVP complete and deployed. Currently running in SES sandbox (recipient address w
 - URL extraction from both text and HTML bodies, deduplicated
 - Structured JSON verdict logging to CloudWatch for Insights queries and future SIEM ingestion
 - Loop prevention tightened to eliminate noreply false-drops
+- Per-sender rate limiting via DynamoDB fixed-window counter with TTL expiry, fail-open on infrastructure errors
 - Standardized logging across the function (no stray `print()` calls)
 
 ## Roadmap
 
 **Near term**
-- Rate limiting via DynamoDB per-sender counter with TTL
+- SES production access (rate limiting prerequisite now complete)
 
 **Medium term**
-- SES production access (requires rate limiting first)
 - URL reputation enrichment via VirusTotal, URLScan.io, and PhishTank
 - Wazuh SIEM integration: CloudWatch Logs pulled into Wazuh via the native AWS module, with custom decoders for the verdict JSON schema, MITRE ATT&CK-mapped detection rules (T1566.001, T1566.002, T1534), and a dashboard for verdict distribution and indicator trends
 - Landing page and submission portal at fredsprivacy.com
