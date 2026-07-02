@@ -60,7 +60,7 @@ The pipeline itself:
 
 ```
 lambda_handler.py                 the entire Lambda (both entry paths)
-test_lambda_handler.py            41-test suite, all external boundaries mocked
+test_lambda_handler.py            42-test suite, all external boundaries mocked
 index.html                        landing page + drag-and-drop web analyzer
 wazuh/
   phish-analyzer-decoders.xml     custom decoder (PHISH_VERDICT → JSON)
@@ -199,6 +199,28 @@ Early loop-prevention logic dropped any submission whose sender local-part match
 
 **Lesson.** Loop prevention is a class of input filter, and input filters that over-match silently destroy real signal. The right guard is identity-based (is this *our* address?), not pattern-based.
 
+## Testing
+
+`test_lambda_handler.py` is a 42-test suite that exercises the analyzer's logic without touching real AWS, Anthropic, or threat-intel infrastructure. S3, SES, DynamoDB, and the Anthropic API are all mocked, so the tests run in a couple seconds and never cost money or send real mail.
+
+Run it with:
+
+```bash
+pip install pytest anthropic boto3 beautifulsoup4 confusable_homoglyphs
+python -m pytest test_lambda_handler.py -v
+```
+
+What it covers:
+
+- **Parsing** — plain-text, HTML-only, and forwarded (`message/rfc822`) submissions
+- **Enrichment** — DMARC-senior scoring, HTML link-mismatch detection, lookalike/homoglyph domain detection
+- **URL reputation** — flagging on a hit, handling a 404/unknown result, cache hits vs fresh lookups, fail-open behavior when a service errors, the per-email lookup cap, and the weak-vs-strong urlscan tag distinction
+- **Model escalation** — every trigger condition (`suspicious` verdict, low-confidence definite verdict), the full escalation path, and graceful fallback to the Haiku verdict if Sonnet errors
+- **SES path** — the happy path, skipping the analyzer's own replies and bounces, correctly analyzing legitimate `noreply@` senders, rate-limit drops with fail-open behavior, and forwarded `.eml` attachments
+- **HTTP path** — CORS preflight, method restrictions, base64 vs raw POST bodies, the 400/413/429 error responses, and confirming the IP-based and sender-based rate-limit buckets never collide
+
+The suite catches regressions before a change ever reaches Lambda — every fix in this project was verified against the full suite before deployment, and two real production bugs (a missing DynamoDB IAM permission, and a urlscan free-tier query restriction) were caught by testing against real API responses in a way the mocked suite alone couldn't have — worth noting as a reminder that unit tests validate logic, not live infrastructure or third-party API behavior.
+
 ## Security and cost controls
 
 - IAM scoped to least privilege; deny policy blocks EC2, Bedrock, SageMaker, and other compute services unrelated to the function's purpose
@@ -211,7 +233,7 @@ Early loop-prevention logic dropped any submission whose sender local-part match
 - Loop prevention rejects submissions from the analyzer's own address/domain, true bounce senders (`mailer-daemon`, `postmaster`, `bounces`), RFC 3834 auto-responders, and `Precedence: bulk/junk/list` headers — without over-matching on legitimate `noreply@` transactional mail
 - Errors caught at the API and SES boundaries; an Anthropic API failure returns a "service temporarily unavailable, treat with caution" reply rather than crashing the function
 - All error paths use the standard `logging` module (including `logger.exception` for unexpected errors, which captures full tracebacks to CloudWatch) for consistent observability
-- 41-test suite covering both entry paths, all filters, reputation services, and escalation logic, with every external boundary mocked
+- 42-test suite covering both entry paths, all filters, reputation services, and escalation logic, with every external boundary mocked (see Testing section below)
 
 ## Status
 
