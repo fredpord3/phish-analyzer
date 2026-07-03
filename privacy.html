@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — Fred's Privacy</title>
+<meta name="description" content="How Fred's Privacy phishing email analyzer handles the emails and data you submit.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0B0F14;
+    --bg-raise:#121821;
+    --bg-card:#161E29;
+    --line:#243040;
+    --text:#E8EDF2;
+    --text-dim:#9AA7B4;
+    --accent:#FF6B1A;
+    --accent-soft:rgba(255,107,26,.12);
+    --info:#5CC8FF;
+    --display:'Space Grotesk',system-ui,sans-serif;
+    --body:'Inter',system-ui,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--bg);color:var(--text);font-family:var(--body);
+    font-size:16px;line-height:1.7;-webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--info);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:800px;margin:0 auto;padding:0 24px}
+  nav{
+    position:sticky;top:0;z-index:50;
+    background:rgba(11,15,20,.85);backdrop-filter:blur(12px);
+    border-bottom:1px solid var(--line);
+  }
+  .nav-inner{display:flex;align-items:center;gap:28px;height:64px;max-width:1080px;margin:0 auto;padding:0 24px}
+  .brand{font-family:var(--display);font-weight:700;font-size:17px;color:var(--text)}
+  .brand:hover{text-decoration:none}
+  .brand span{color:var(--accent)}
+  .nav-links{display:flex;gap:22px;margin-left:auto;align-items:center}
+  .nav-links a{font-size:14px;color:var(--text-dim);font-weight:500}
+  .nav-links a:hover{color:var(--text);text-decoration:none}
+
+  header.doc-head{padding:64px 0 32px}
+  .eyebrow{
+    font-family:var(--mono);font-size:12px;font-weight:600;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:16px;
+  }
+  h1{
+    font-family:var(--display);font-weight:700;
+    font-size:clamp(30px,5vw,44px);line-height:1.1;letter-spacing:-.02em;margin-bottom:14px;
+  }
+  .updated{font-family:var(--mono);font-size:13px;color:var(--text-dim);letter-spacing:.03em}
+
+  main{padding-bottom:80px}
+  .callout{
+    background:var(--accent-soft);border-left:3px solid var(--accent);
+    border-radius:0 8px 8px 0;padding:18px 22px;margin:8px 0 36px;
+    color:var(--text);font-size:15px;
+  }
+  .callout strong{color:var(--text)}
+  h2{
+    font-family:var(--display);font-weight:600;
+    font-size:clamp(20px,3vw,26px);line-height:1.2;letter-spacing:-.01em;
+    margin:44px 0 14px;padding-top:8px;
+  }
+  h3{font-family:var(--display);font-weight:600;font-size:17px;margin:26px 0 8px}
+  p{color:var(--text-dim);margin-bottom:16px;max-width:70ch}
+  p strong,li strong{color:var(--text);font-weight:600}
+  ul{color:var(--text-dim);margin:0 0 18px 0;padding-left:22px;max-width:70ch}
+  li{margin-bottom:10px}
+  .placeholder{
+    font-family:var(--mono);font-size:.92em;color:var(--accent);
+    background:var(--accent-soft);padding:1px 6px;border-radius:4px;
+  }
+  code{font-family:var(--mono);font-size:.9em;color:var(--info);background:var(--bg-raise);padding:1px 6px;border-radius:4px}
+  hr{border:none;border-top:1px solid var(--line);margin:44px 0}
+  footer{padding:36px 0 48px;font-size:14px;color:var(--text-dim);border-top:1px solid var(--line)}
+  footer .wrap{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a class="brand" href="/">FRED'S<span>/</span>PRIVACY</a>
+    <div class="nav-links">
+      <a href="/">Analyzer</a>
+      <a href="/terms.html">Terms</a>
+      <a href="https://github.com/fredpord3/phish-analyzer">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="doc-head">
+  <div class="wrap">
+    <div class="eyebrow">/ Privacy</div>
+    <h1>Privacy Policy</h1>
+    <p class="updated">Last updated: <span class="placeholder">07/03/2026</span></p>
+  </div>
+</header>
+
+<main>
+<div class="wrap">
+
+  <div class="callout">
+    <strong>The short version:</strong> Fred's Privacy analyzes emails you submit for phishing indicators.
+    To do that, the content of your email is sent to third-party services (Anthropic and threat-intelligence
+    providers). Don't submit emails containing passwords, financial details, or personal information you
+    wouldn't want processed by a cloud service. This is a personal, non-commercial project provided free and
+    "as is."
+  </div>
+
+  <h2>1. Who runs this service</h2>
+  <p>
+    Fred's Privacy ("the Service," "we," "us") is a personal, non-commercial project operated by an individual
+    developer. It provides an automated tool that analyzes emails for phishing and scam indicators. It is not a
+    company, and it is offered without charge. Questions about this policy can be sent to
+    <span class="placeholder">pordfred3@gmail.com</span>.
+  </p>
+
+  <h2>2. What you submit</h2>
+  <p>You can submit an email for analysis in two ways, and they are handled differently:</p>
+  <ul>
+    <li>
+      <strong>Through the website:</strong> when you drop in or paste an email at
+      <code>www.fredsprivacy.com</code>, the raw email is sent to our analysis function, processed in memory,
+      and returned to you as a verdict. <strong>The website submission is not written to long-term storage.</strong>
+    </li>
+    <li>
+      <strong>By email:</strong> when you forward an email to our analysis address, the incoming message is
+      received by Amazon SES and stored temporarily in an Amazon S3 bucket so our function can read it. These
+      stored emails are <strong>automatically deleted after 7 days.</strong>
+    </li>
+  </ul>
+  <p>
+    In both cases, "the email" includes its headers, body text, and any links it contains &mdash; because those
+    are exactly what the analysis inspects.
+  </p>
+
+  <h2>3. Third parties that process your email</h2>
+  <p>
+    Analyzing an email requires sending parts of it to external services. By using the Service, you understand
+    that the following third parties may receive email content:
+  </p>
+  <ul>
+    <li>
+      <strong>Anthropic (Claude API):</strong> the email's headers and body (truncated) are sent to Anthropic's
+      Claude models to assess social-engineering patterns. Anthropic processes this data under its own API terms
+      and data-handling policies.
+    </li>
+    <li>
+      <strong>Threat-intelligence providers:</strong> up to three links found in the email are checked against
+      <strong>VirusTotal</strong>, <strong>urlscan.io</strong>, and <strong>PhishTank</strong>. This means those
+      URLs (and the domains within them) are shared with those services, each of which has its own privacy policy.
+    </li>
+  </ul>
+  <p>
+    We do not control how these third parties use data submitted to them. Review their respective privacy
+    policies if that matters to you.
+  </p>
+
+  <h2>4. What we log and keep</h2>
+  <p>
+    For each analysis we record a small metadata log entry to help us monitor and debug the Service. This log
+    <strong>does not contain the email body or the sender's full address.</strong> It records items such as:
+    the sender's domain, the return-path domain, SPF/DKIM/DMARC authentication results, the number of links
+    found, the verdict, and the confidence score. These logs are retained for <strong>30 days</strong> and then
+    automatically deleted.
+  </p>
+  <p>
+    We also temporarily store, in a database with automatic expiration: short-lived counters used for rate
+    limiting (keyed to a sender email address or IP address), and cached URL-reputation results (keyed to a
+    hashed version of the URL). These entries expire automatically and are not used to build any profile of you.
+  </p>
+
+  <h2>5. What we do not do</h2>
+  <ul>
+    <li>We do not sell or rent your data.</li>
+    <li>We do not use your submitted emails to build advertising profiles.</li>
+    <li>We do not require you to create an account or provide personal information to use the Service.</li>
+    <li>We do not intentionally retain the content of analyzed emails beyond the windows described above.</li>
+  </ul>
+
+  <h2>6. Please don't submit sensitive information</h2>
+  <p>
+    Because your email is processed by automated cloud services and third parties, <strong>you should not submit
+    emails that contain passwords, financial account details, government identifiers, health information, or
+    other sensitive personal data.</strong> If an email you want checked contains such information, redact it
+    first, or simply don't submit it. You are responsible for what you choose to send to the Service.
+  </p>
+
+  <h2>7. Children</h2>
+  <p>
+    The Service is not directed at children and is not intended for use by anyone under 13. We do not knowingly
+    collect information from children.
+  </p>
+
+  <h2>8. Security</h2>
+  <p>
+    The Service uses reasonable technical measures (transport encryption, short retention windows, rate
+    limiting), but no method of transmission or storage is perfectly secure. This is a personal project provided
+    without warranty, and you use it at your own risk.
+  </p>
+
+  <h2>9. Changes to this policy</h2>
+  <p>
+    This policy may be updated from time to time. The "last updated" date at the top reflects the most recent
+    change. Continued use of the Service after a change means you accept the updated policy.
+  </p>
+
+  <h2>10. Contact</h2>
+  <p>
+    Questions or requests regarding this policy or your data can be directed to
+    <span class="placeholder">pordfred3@gmail.com</span>.
+  </p>
+
+  <hr>
+  <p style="font-size:13px">
+    This document is provided for transparency about how the Service handles data. It is not legal advice, and
+    it has not been reviewed by an attorney.
+  </p>
+
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Fred's Privacy &mdash; a personal security engineering project.</span>
+    <a href="/">&larr; Back to analyzer</a>
+  </div>
+</footer>
+
+</body>
+</html>
