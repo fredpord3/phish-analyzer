@@ -1,15 +1,17 @@
 # Phish Analyzer
 
-Serverless phishing email analyzer. Forward a suspicious email — or drop the `.eml` on the web page — and get back a structured verdict with confidence score, indicators of compromise, and a recommendation in under ten seconds.
+Serverless phishing email analyzer. Forward a suspicious email — or drop the `.eml` on the web page — and get back a structured verdict with confidence score, indicators of compromise, and a recommendation in seconds.
 
 Combines deterministic header analysis (SPF, DKIM, DMARC, URL extraction, sender alignment, lookalike-domain detection, HTML link-mismatch detection), threat-intelligence URL reputation (VirusTotal, urlscan.io, PhishTank), and LLM-based content review with hybrid model routing (Claude Haiku 4.5, escalating to Sonnet when unsure). Verdict telemetry flows to CloudWatch as structured JSON, queryable directly in CloudWatch Insights.
+
+Live at [www.fredsprivacy.com](https://www.fredsprivacy.com).
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     A[User forwards .eml] --> B[SES Inbound]
-    W[Web upload at fredsprivacy.com] --> U[Lambda Function URL]
+    W[Web upload at www.fredsprivacy.com] --> U[Lambda Function URL]
     B --> C[S3 raw email]
     B --> D[Lambda - Python 3.13]
     U --> D
@@ -31,7 +33,7 @@ Two entry paths feed one pipeline:
 
 **Email path.** User forwards a suspicious email as a `.eml` attachment to the check address. Amazon SES writes the raw RFC 822 source to S3 under `inbound/` and triggers Lambda. Lambda runs loop/bounce detection (rejecting its own replies, mailer-daemon bounces, RFC 3834 auto-responders, and bulk-mail markers), then enforces a per-sender rate limit before any parsing or model call. The verdict comes back as an email reply.
 
-**Web path.** The landing page at fredsprivacy.com POSTs the raw `.eml` to a Lambda Function URL. The same pipeline runs — rate limited per source IP instead of per sender — and the verdict comes back as JSON, rendered in the browser. No email involved.
+**Web path.** The landing page at www.fredsprivacy.com POSTs the raw `.eml` to a Lambda Function URL. The same pipeline runs — rate limited per source IP instead of per sender — and the verdict comes back as JSON, rendered in the browser. No email involved.
 
 The pipeline itself:
 
@@ -45,21 +47,25 @@ The pipeline itself:
 
 - AWS Lambda (Python 3.13) for serverless compute, with a Function URL for the web path
 - Amazon SES for inbound mail receiving and outbound replies
-- Amazon S3 for raw email storage
+- Amazon S3 for raw email storage, with a lifecycle rule that auto-deletes inbound emails after 7 days
 - Amazon DynamoDB for per-sender/per-IP rate-limit counters and the URL-reputation cache, both with TTL-based expiry
-- CloudWatch Logs for structured verdict telemetry
+- CloudWatch Logs for structured verdict telemetry, with a 30-day retention policy
 - Anthropic Claude (Haiku 4.5 primary, Sonnet 4.6 escalation) for content analysis
 - VirusTotal, urlscan.io, and PhishTank for URL reputation
 - BeautifulSoup for HTML parsing (URL extraction, link-mismatch detection)
 - `confusable_homoglyphs` for Unicode lookalike detection
-- Cloudflare DNS for MX records and DKIM CNAMEs; Cloudflare Pages for the landing page
+- Cloudflare DNS for MX records, DKIM CNAMEs, and SPF/DMARC records; Cloudflare (Workers static assets) for the landing page
 
 ## Repository layout
 
 ```
 lambda_handler.py                 the entire Lambda (both entry paths)
-test_lambda_handler.py            50-test suite, all external boundaries mocked
-web/index.html                    landing page + drag-and-drop web analyzer
+test_lambda_handler.py            42-test suite, all external boundaries mocked
+index.html                        landing page + drag-and-drop web analyzer
+privacy.html                      privacy policy
+terms.html                        terms of service
+security.txt                      security contact (RFC 9116)
+robots.txt                        crawler policy
 README.md                         this file
 ```
 
@@ -151,8 +157,7 @@ Every verdict produces one structured JSON log line to CloudWatch, prefixed with
 }
 ```
 
-This format supports CloudWatch Insights queries directly: verdict distribution over time, top sender domains by phish count, DMARC pass/fail ratios, and escalation rate.
-
+This format supports CloudWatch Insights queries directly: verdict distribution over time, top sender domains by phish count, DMARC pass/fail ratios, and escalation rate. Verdict logs are retained for 30 days.
 
 ## Case studies: false positives and what they taught me
 
@@ -186,7 +191,7 @@ Early loop-prevention logic dropped any submission whose sender local-part match
 
 ## Testing
 
-`test_lambda_handler.py` is a 50-test suite that exercises the analyzer's logic without touching real AWS, Anthropic, or threat-intel infrastructure. S3, SES, DynamoDB, and the Anthropic API are all mocked, so the tests run in a couple seconds and never cost money or send real mail.
+`test_lambda_handler.py` is a 42-test suite that exercises the analyzer's logic without touching real AWS, Anthropic, or threat-intel infrastructure. S3, SES, DynamoDB, and the Anthropic API are all mocked, so the tests run in a couple seconds and never cost money or send real mail.
 
 Run it with:
 
@@ -215,13 +220,16 @@ The suite catches regressions before a change ever reaches Lambda — every fix 
 - Web path enforces a 500 KB body limit, validates the upload actually parses as an email, and restricts CORS to the production origin via `ALLOWED_ORIGIN`
 - Model output is schema-enforced before use (verdict whitelist, confidence clamped 0-100, indicator entries validated), and the analysis prompt explicitly treats email content as untrusted data - an email that tries to instruct the analyzer is itself reported as an indicator
 - Malformed and hostile inputs degrade instead of crash: unknown charsets fall back to replacement decoding, and unexpected pipeline errors on the web path return structured JSON (with CORS headers) rather than a bare 502
-- Anthropic API spend capped at $10 per month with alerts at $6 and $8; escalation to Sonnet is opt-in via environment variable
+- Data retention is bounded: raw inbound emails in S3 are auto-deleted after 7 days via a lifecycle rule, and CloudWatch verdict logs are retained for 30 days; verdict logs contain metadata only (sender domain, auth results, verdict) — never the email body or full sender address
+- Email authentication hardened on the domain itself: SPF published on the root, DMARC set to `p=quarantine` with aggregate reporting, and enforced HTTPS on the web origin
+- Anthropic API usage is on prepaid credits with auto-reload disabled (spend cannot exceed the loaded balance), plus a $5 monthly spend limit with email alerts at $2 and $4; escalation to Sonnet is opt-in via environment variable
 - AWS budgets at $0.01 (zero-spend tripwire) and $5 (operational ceiling) with email alerts
 - All credentials live in Lambda environment variables; nothing in source
 - Loop prevention rejects submissions from the analyzer's own address/domain, true bounce senders (`mailer-daemon`, `postmaster`, `bounces`), RFC 3834 auto-responders, and `Precedence: bulk/junk/list` headers — without over-matching on legitimate `noreply@` transactional mail
 - Errors caught at the API and SES boundaries; an Anthropic API failure returns a "service temporarily unavailable, treat with caution" reply rather than crashing the function
 - All error paths use the standard `logging` module (including `logger.exception` for unexpected errors, which captures full tracebacks to CloudWatch) for consistent observability
-- 50-test suite covering both entry paths, all filters, reputation services, and escalation logic, with every external boundary mocked (see Testing section below)
+- 42-test suite covering both entry paths, all filters, reputation services, and escalation logic, with every external boundary mocked (see Testing section above)
+- Published privacy policy and terms of service disclosing data handling and the advisory-only nature of verdicts
 
 ## Status
 
@@ -233,20 +241,20 @@ The suite catches regressions before a change ever reaches Lambda — every fix 
 - HTML link mismatch detection (anchor text vs href hostname) via BeautifulSoup
 - Lookalike/homoglyph detection on sender domain against a watchlist of commonly-impersonated brands via `confusable_homoglyphs`
 - URL extraction from both text and HTML bodies, deduplicated
-- Structured JSON verdict logging to CloudWatch with a stable decoder anchor (`PHISH_VERDICT`)
+- Structured JSON verdict logging to CloudWatch with a stable decoder anchor (`PHISH_VERDICT`) and 30-day retention
 - Loop prevention tightened to eliminate noreply false-drops
 - Per-sender (email) and per-IP (web) rate limiting via a DynamoDB fixed-window counter with TTL expiry, fail-open on infrastructure errors
 - HTTP entry path via Lambda Function URL, POST-only with a 500 KB body cap and CORS restricted to the production origin
-- Full test suite (50 tests) with mocked AWS, Anthropic, and threat-intel boundaries
-
-**Built, code-complete, not yet deployed**
-- Landing page with drag-and-drop `.eml` analysis (the Lambda Function URL it posts to is live; the page itself deploys to fredsprivacy.com via Cloudflare Pages)
+- Full test suite (42 tests) with mocked AWS, Anthropic, and threat-intel boundaries
+- Landing page live at www.fredsprivacy.com (Cloudflare) with drag-and-drop `.eml` analysis, published privacy policy and terms of service, security.txt, and a root→www redirect
+- S3 lifecycle expiry (7-day) on raw inbound emails; bounded data retention throughout
+- Domain email authentication hardened: root SPF, DMARC `p=quarantine` with reporting, enforced HTTPS
 
 ## Roadmap
 
 **Near term**
-- Deploy the landing page to fredsprivacy.com (Cloudflare Pages)
-- SES production access to lift the sandbox recipient whitelist (rate limiting and abuse controls now in place; a live landing page strengthens the request)
+- SES production access to lift the sandbox recipient whitelist (rate limiting, abuse controls, and a live landing page are all now in place to strengthen the request)
+- Push the current handler and test suite to the repository so the published source matches production
 
 **Medium term**
 - Turnstile/CAPTCHA on the web upload path if public traffic warrants it
@@ -255,6 +263,8 @@ The suite catches regressions before a change ever reaches Lambda — every fix 
 **Long term**
 - Attachment analysis (hash lookups against VirusTotal for attached files)
 - Per-user history: "you've asked about this sender before"
+- Digit-for-letter (leet) lookalike heuristic to complement Unicode confusables detection
+- Wazuh homelab integration for SIEM-side alerting (separate homelab project)
 
 ## License
 
