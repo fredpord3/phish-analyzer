@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Terms of Service — Fred's Privacy</title>
+<meta name="description" content="Terms of use for the Fred's Privacy phishing email analyzer.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0B0F14;
+    --bg-raise:#121821;
+    --bg-card:#161E29;
+    --line:#243040;
+    --text:#E8EDF2;
+    --text-dim:#9AA7B4;
+    --accent:#FF6B1A;
+    --accent-soft:rgba(255,107,26,.12);
+    --info:#5CC8FF;
+    --display:'Space Grotesk',system-ui,sans-serif;
+    --body:'Inter',system-ui,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--bg);color:var(--text);font-family:var(--body);
+    font-size:16px;line-height:1.7;-webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--info);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:800px;margin:0 auto;padding:0 24px}
+  nav{
+    position:sticky;top:0;z-index:50;
+    background:rgba(11,15,20,.85);backdrop-filter:blur(12px);
+    border-bottom:1px solid var(--line);
+  }
+  .nav-inner{display:flex;align-items:center;gap:28px;height:64px;max-width:1080px;margin:0 auto;padding:0 24px}
+  .brand{font-family:var(--display);font-weight:700;font-size:17px;color:var(--text)}
+  .brand:hover{text-decoration:none}
+  .brand span{color:var(--accent)}
+  .nav-links{display:flex;gap:22px;margin-left:auto;align-items:center}
+  .nav-links a{font-size:14px;color:var(--text-dim);font-weight:500}
+  .nav-links a:hover{color:var(--text);text-decoration:none}
+
+  header.doc-head{padding:64px 0 32px}
+  .eyebrow{
+    font-family:var(--mono);font-size:12px;font-weight:600;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:16px;
+  }
+  h1{
+    font-family:var(--display);font-weight:700;
+    font-size:clamp(30px,5vw,44px);line-height:1.1;letter-spacing:-.02em;margin-bottom:14px;
+  }
+  .updated{font-family:var(--mono);font-size:13px;color:var(--text-dim);letter-spacing:.03em}
+
+  main{padding-bottom:80px}
+  .callout{
+    background:var(--accent-soft);border-left:3px solid var(--accent);
+    border-radius:0 8px 8px 0;padding:18px 22px;margin:8px 0 36px;
+    color:var(--text);font-size:15px;
+  }
+  .callout strong{color:var(--text)}
+  h2{
+    font-family:var(--display);font-weight:600;
+    font-size:clamp(20px,3vw,26px);line-height:1.2;letter-spacing:-.01em;
+    margin:44px 0 14px;padding-top:8px;
+  }
+  p{color:var(--text-dim);margin-bottom:16px;max-width:70ch}
+  p strong,li strong{color:var(--text);font-weight:600}
+  ul{color:var(--text-dim);margin:0 0 18px 0;padding-left:22px;max-width:70ch}
+  li{margin-bottom:10px}
+  .placeholder{
+    font-family:var(--mono);font-size:.92em;color:var(--accent);
+    background:var(--accent-soft);padding:1px 6px;border-radius:4px;
+  }
+  code{font-family:var(--mono);font-size:.9em;color:var(--info);background:var(--bg-raise);padding:1px 6px;border-radius:4px}
+  .strong-notice{
+    background:var(--bg-card);border:1px solid var(--line);border-radius:10px;
+    padding:22px 24px;margin:24px 0;
+  }
+  .strong-notice p{margin-bottom:0;color:var(--text)}
+  hr{border:none;border-top:1px solid var(--line);margin:44px 0}
+  footer{padding:36px 0 48px;font-size:14px;color:var(--text-dim);border-top:1px solid var(--line)}
+  footer .wrap{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a class="brand" href="/">FRED'S<span>/</span>PRIVACY</a>
+    <div class="nav-links">
+      <a href="/">Analyzer</a>
+      <a href="/privacy.html">Privacy</a>
+      <a href="https://github.com/fredpord3/phish-analyzer">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="doc-head">
+  <div class="wrap">
+    <div class="eyebrow">/ Terms</div>
+    <h1>Terms of Service</h1>
+    <p class="updated">Last updated: <span class="placeholder">07/03/2026</span></p>
+  </div>
+</header>
+
+<main>
+<div class="wrap">
+
+  <div class="callout">
+    <strong>The short version:</strong> This is a free, personal project that gives you an automated
+    <em>advisory</em> opinion on whether an email looks like phishing. It can be wrong. Never treat its verdict as
+    a guarantee, and always verify anything important through a channel you already trust. Use it at your own risk.
+  </div>
+
+  <h2>1. Acceptance of these terms</h2>
+  <p>
+    By using Fred's Privacy (the "Service") &mdash; whether through the website or by forwarding email to it &mdash;
+    you agree to these Terms of Service. If you do not agree, do not use the Service.
+  </p>
+
+  <h2>2. What the Service is</h2>
+  <p>
+    The Service is a personal, non-commercial project that analyzes submitted emails for indicators of phishing
+    and scams, and returns an automated verdict with a confidence score and supporting indicators. It combines
+    email-authentication checks, link reputation lookups, and AI content analysis.
+  </p>
+
+  <h2>3. Advisory only &mdash; no guarantee</h2>
+  <div class="strong-notice">
+    <p>
+      <strong>The Service's output is advisory and informational only. It is not a guarantee, certification, or
+      professional security assessment.</strong> The Service may classify a dangerous email as safe (a false
+      negative) or a safe email as dangerous (a false positive). You must not rely on it as your sole basis for
+      deciding whether to trust an email, click a link, open an attachment, transfer money, or share information.
+      When anything of value is at stake, independently verify the sender through a channel you already trust.
+    </p>
+  </div>
+
+  <h2>4. Acceptable use</h2>
+  <p>You agree that you will not:</p>
+  <ul>
+    <li>Submit content you do not have the right to submit, or that violates the rights of others.</li>
+    <li>
+      Submit emails containing passwords, financial account numbers, government identifiers, health information,
+      or other sensitive personal data (see the <a href="/privacy.html">Privacy Policy</a> for why).
+    </li>
+    <li>Use the Service to build, test, or refine phishing or malware for malicious purposes.</li>
+    <li>
+      Attempt to overload, disrupt, reverse-engineer for abuse, or circumvent the rate limits or other protective
+      measures of the Service.
+    </li>
+    <li>Use the Service in any way that violates applicable law.</li>
+  </ul>
+  <p>
+    The Service applies automated rate limiting and may block, throttle, or refuse requests at any time,
+    for any reason, without notice.
+  </p>
+
+  <h2>5. Third-party processing</h2>
+  <p>
+    To perform analysis, the Service sends email content to third parties, including Anthropic (for AI analysis)
+    and threat-intelligence providers (for link reputation). By using the Service you consent to this processing.
+    Details are in the <a href="/privacy.html">Privacy Policy</a>. The Service is not responsible for the practices
+    of those third parties.
+  </p>
+
+  <h2>6. No warranty</h2>
+  <p>
+    The Service is provided <strong>"as is" and "as available," without warranties of any kind</strong>, whether
+    express or implied, including but not limited to warranties of merchantability, fitness for a particular
+    purpose, accuracy, or non-infringement. The Service may be unavailable, interrupted, or discontinued at any
+    time without notice. There is no guarantee of uptime, accuracy, or continued availability.
+  </p>
+
+  <h2>7. Limitation of liability</h2>
+  <p>
+    To the maximum extent permitted by law, the operator of the Service shall not be liable for any indirect,
+    incidental, consequential, special, or punitive damages, or for any loss of data, money, profits, or goodwill,
+    arising out of or related to your use of (or inability to use) the Service &mdash; including any decision you
+    make based on its output. Because the Service is provided free of charge as a personal project, you agree that
+    the operator's total liability to you for any claim arising from the Service shall not exceed the amount you
+    paid to use it, which is zero.
+  </p>
+
+  <h2>8. Indemnification</h2>
+  <p>
+    You agree to hold harmless the operator of the Service from any claims or demands arising out of your misuse
+    of the Service or your violation of these terms.
+  </p>
+
+  <h2>9. Changes and termination</h2>
+  <p>
+    These terms may be updated from time to time; the "last updated" date reflects the latest version. The Service
+    may be modified, suspended, or shut down at any time. Continued use after a change constitutes acceptance of
+    the updated terms.
+  </p>
+
+  <h2>10. Governing law</h2>
+  <p>
+    These terms are governed by the laws of the United States and the state in which the operator resides, without
+    regard to conflict-of-law principles. Any dispute shall be subject to the exclusive jurisdiction of the courts
+    located there.
+  </p>
+
+  <h2>11. Contact</h2>
+  <p>
+    Questions about these terms can be directed to
+    <span class="placeholder">fredpord3@gmail.com</span>.
+  </p>
+
+  <hr>
+  <p style="font-size:13px">
+    This document is provided for transparency. It is not legal advice, and it has not been reviewed by an attorney.
+  </p>
+
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Fred's Privacy &mdash; a personal security engineering project.</span>
+    <a href="/">&larr; Back to analyzer</a>
+  </div>
+</footer>
+
+</body>
+</html>
