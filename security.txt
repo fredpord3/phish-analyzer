@@ -1,0 +1,8 @@
+# Security contact information for fredsprivacy.com
+# Fred's Privacy — phishing email analyzer (personal project)
+# https://www.fredsprivacy.com
+
+Contact: mailto:pordfred3@gmail.com
+Expires: 2027-07-03T00:00:00.000Z
+Preferred-Languages: en
+Canonical: https://www.fredsprivacy.com/security.txt
