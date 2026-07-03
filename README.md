@@ -2,7 +2,7 @@
 
 Serverless phishing email analyzer. Forward a suspicious email — or drop the `.eml` on the web page — and get back a structured verdict with confidence score, indicators of compromise, and a recommendation in under ten seconds.
 
-Combines deterministic header analysis (SPF, DKIM, DMARC, URL extraction, sender alignment, lookalike-domain detection, HTML link-mismatch detection), threat-intelligence URL reputation (VirusTotal, urlscan.io, PhishTank), and LLM-based content review with hybrid model routing (Claude Haiku 4.5, escalating to Sonnet when unsure). Verdict telemetry flows to CloudWatch and into Wazuh with MITRE ATT&CK-mapped detection rules.
+Combines deterministic header analysis (SPF, DKIM, DMARC, URL extraction, sender alignment, lookalike-domain detection, HTML link-mismatch detection), threat-intelligence URL reputation (VirusTotal, urlscan.io, PhishTank), and LLM-based content review with hybrid model routing (Claude Haiku 4.5, escalating to Sonnet when unsure). Verdict telemetry flows to CloudWatch as structured JSON, queryable directly in CloudWatch Insights.
 
 ## Architecture
 
@@ -23,7 +23,6 @@ flowchart LR
     F2 --> G
     G --> H[SES Outbound reply / JSON response]
     D --> I[CloudWatch verdict logs]
-    I --> Z[Wazuh SIEM - MITRE-mapped rules]
 ```
 
 ## How it works
@@ -40,7 +39,7 @@ The pipeline itself:
 2. Check extracted URLs against configured threat-intelligence services — VirusTotal, urlscan.io, and PhishTank — with a 24-hour DynamoDB cache and a hard cap on lookups per email. Positive hits are strong evidence; absence of hits proves nothing, and the model prompt says so explicitly.
 3. Pass parsed content and enriched signals to Claude Haiku with a structured prompt defining a verdict hierarchy. If escalation is enabled and Haiku returns `suspicious` or a low-confidence verdict, the same prompt is re-run on Sonnet and the stronger model's verdict wins.
 4. Claude returns JSON with a verdict tier, a 0-100 confidence score, indicators of compromise, and a user-facing explanation.
-5. Lambda writes one structured JSON log line per verdict to CloudWatch (marked `PHISH_VERDICT` for reliable Wazuh decoding) and returns the verdict through whichever channel the submission arrived on.
+5. Lambda writes one structured JSON log line per verdict to CloudWatch (marked `PHISH_VERDICT` so CloudWatch Insights queries have a stable anchor) and returns the verdict through whichever channel the submission arrived on.
 
 ## Tech stack
 
@@ -49,7 +48,6 @@ The pipeline itself:
 - Amazon S3 for raw email storage
 - Amazon DynamoDB for per-sender/per-IP rate-limit counters and the URL-reputation cache, both with TTL-based expiry
 - CloudWatch Logs for structured verdict telemetry
-- Wazuh for SIEM ingestion, MITRE ATT&CK-mapped rules, and dashboards
 - Anthropic Claude (Haiku 4.5 primary, Sonnet 4.6 escalation) for content analysis
 - VirusTotal, urlscan.io, and PhishTank for URL reputation
 - BeautifulSoup for HTML parsing (URL extraction, link-mismatch detection)
@@ -60,13 +58,9 @@ The pipeline itself:
 
 ```
 lambda_handler.py                 the entire Lambda (both entry paths)
-test_lambda_handler.py            42-test suite, all external boundaries mocked
-index.html                        landing page + drag-and-drop web analyzer
-wazuh/
-  phish-analyzer-decoders.xml     custom decoder (PHISH_VERDICT → JSON)
-  phish-analyzer-rules.xml        rules 100100-100140, MITRE-mapped
-  SETUP.md                        CloudWatch → Wazuh ingestion guide
-DEPLOYMENT.md                     step-by-step rollout instructions
+test_lambda_handler.py            50-test suite, all external boundaries mocked
+web/index.html                    landing page + drag-and-drop web analyzer
+README.md                         this file
 ```
 
 ## Design decisions
@@ -107,7 +101,7 @@ The reply email and the web JSON response are rendered from the same schema, not
 - Confidence scores are bounded 0-100
 - Indicators are a list, not a paragraph
 
-Free-form output is unparseable at scale. Structured output lets the same verdict feed an email reply, a web response, a CloudWatch log entry, and the Wazuh pipeline without re-parsing model prose.
+Free-form output is unparseable at scale. Structured output lets the same verdict feed an email reply, a web response, and a CloudWatch log entry without re-parsing model prose. The model's JSON is also schema-enforced on the way in: confidence is coerced to an integer and clamped 0-100, non-dict entries in the indicators list are dropped, and text fields are coerced to strings - so malformed model output degrades a verdict instead of crashing the reply path after the API call has already been paid for.
 
 ### Why DMARC is the senior signal
 
@@ -122,6 +116,12 @@ The rate limiter uses a single atomic `UpdateItem` with an `ADD` expression, key
 - **Fail-open on infrastructure errors.** If the DynamoDB call itself throws (throttling, transient AWS issue), the check allows the email through and logs the error loudly to CloudWatch. Fail-closed would mean a DynamoDB blip silently drops legitimate mail, which is the worse failure for a tool whose whole value is answering the user.
 
 Rate-limited email senders are dropped silently with no reply, the same policy as loop/bounce handling — a bounce or rejection reply to a high-volume sender would itself be a new abuse vector. Web submissions over the limit get an honest HTTP 429, since there's no reply-storm risk on that path.
+
+### Known limitations
+
+- **Digit-for-letter lookalikes.** The lookalike detector is built on Unicode confusables data, which catches script-substitution attacks (Cyrillic 'а' for Latin 'a') but not ASCII digit swaps like `paypa1.com` or `micr0soft.com` - those pairs aren't Unicode confusables. Documented rather than silently patched; a targeted leet-substitution heuristic is a candidate improvement.
+- **Reputation lookups are sequential.** Worst case (three URLs, three services, all timing out) adds meaningful latency inside the Lambda timeout budget. Acceptable at current volume; parallelization is the known fix if volume grows.
+- **LLM content review is advisory.** The prompt hardens against instruction injection and the deterministic signals are treated as ground truth, but no LLM-based analysis is adversarially robust in the general case. The verdict schema, auth-header logic, and threat-intel layer deliberately do not depend on the model behaving well.
 
 ## Verdict telemetry
 
@@ -151,7 +151,7 @@ Every verdict produces one structured JSON log line to CloudWatch, prefixed with
 }
 ```
 
-This format supports CloudWatch Insights queries directly (verdict distribution over time, top sender domains by phish count, DMARC pass/fail ratios, escalation rate) and feeds the Wazuh pipeline below.
+This format supports CloudWatch Insights queries directly: verdict distribution over time, top sender domains by phish count, DMARC pass/fail ratios, and escalation rate.
 
 
 ## Case studies: false positives and what they taught me
@@ -186,7 +186,7 @@ Early loop-prevention logic dropped any submission whose sender local-part match
 
 ## Testing
 
-`test_lambda_handler.py` is a 42-test suite that exercises the analyzer's logic without touching real AWS, Anthropic, or threat-intel infrastructure. S3, SES, DynamoDB, and the Anthropic API are all mocked, so the tests run in a couple seconds and never cost money or send real mail.
+`test_lambda_handler.py` is a 50-test suite that exercises the analyzer's logic without touching real AWS, Anthropic, or threat-intel infrastructure. S3, SES, DynamoDB, and the Anthropic API are all mocked, so the tests run in a couple seconds and never cost money or send real mail.
 
 Run it with:
 
@@ -203,6 +203,7 @@ What it covers:
 - **Model escalation** — every trigger condition (`suspicious` verdict, low-confidence definite verdict), the full escalation path, and graceful fallback to the Haiku verdict if Sonnet errors
 - **SES path** — the happy path, skipping the analyzer's own replies and bounces, correctly analyzing legitimate `noreply@` senders, rate-limit drops with fail-open behavior, and forwarded `.eml` attachments
 - **HTTP path** — CORS preflight, method restrictions, base64 vs raw POST bodies, the 400/413/429 error responses, and confirming the IP-based and sender-based rate-limit buckets never collide
+- **Hardening regressions** — DMARC policy parsing that distinguishes `p=` from `sp=` (Gmail reports both), hostile/unknown charsets that must degrade instead of crash, model-output schema sanitization (confidence clamping, non-dict indicator entries), first-seen URL ordering, and CR/LF stripping in echoed reply subjects
 
 The suite catches regressions before a change ever reaches Lambda — every fix in this project was verified against the full suite before deployment, and two real production bugs (a missing DynamoDB IAM permission, and a urlscan free-tier query restriction) were caught by testing against real API responses in a way the mocked suite alone couldn't have — worth noting as a reminder that unit tests validate logic, not live infrastructure or third-party API behavior.
 
@@ -212,13 +213,15 @@ The suite catches regressions before a change ever reaches Lambda — every fix 
 - Per-sender (email path) and per-IP (web path) rate limiting via DynamoDB atomic counters with TTL expiry; the check runs before any model call so abusive volume incurs no API cost, and fails open on infrastructure errors so a DynamoDB blip never silently drops legitimate mail
 - URL-reputation lookups capped at 3 per email, cached 24h, and fully fail-open — external API keys never sit in the critical path
 - Web path enforces a 500 KB body limit, validates the upload actually parses as an email, and restricts CORS to the production origin via `ALLOWED_ORIGIN`
+- Model output is schema-enforced before use (verdict whitelist, confidence clamped 0-100, indicator entries validated), and the analysis prompt explicitly treats email content as untrusted data - an email that tries to instruct the analyzer is itself reported as an indicator
+- Malformed and hostile inputs degrade instead of crash: unknown charsets fall back to replacement decoding, and unexpected pipeline errors on the web path return structured JSON (with CORS headers) rather than a bare 502
 - Anthropic API spend capped at $10 per month with alerts at $6 and $8; escalation to Sonnet is opt-in via environment variable
 - AWS budgets at $0.01 (zero-spend tripwire) and $5 (operational ceiling) with email alerts
 - All credentials live in Lambda environment variables; nothing in source
 - Loop prevention rejects submissions from the analyzer's own address/domain, true bounce senders (`mailer-daemon`, `postmaster`, `bounces`), RFC 3834 auto-responders, and `Precedence: bulk/junk/list` headers — without over-matching on legitimate `noreply@` transactional mail
 - Errors caught at the API and SES boundaries; an Anthropic API failure returns a "service temporarily unavailable, treat with caution" reply rather than crashing the function
 - All error paths use the standard `logging` module (including `logger.exception` for unexpected errors, which captures full tracebacks to CloudWatch) for consistent observability
-- 42-test suite covering both entry paths, all filters, reputation services, and escalation logic, with every external boundary mocked (see Testing section below)
+- 50-test suite covering both entry paths, all filters, reputation services, and escalation logic, with every external boundary mocked (see Testing section below)
 
 ## Status
 
@@ -232,22 +235,20 @@ The suite catches regressions before a change ever reaches Lambda — every fix 
 - URL extraction from both text and HTML bodies, deduplicated
 - Structured JSON verdict logging to CloudWatch with a stable decoder anchor (`PHISH_VERDICT`)
 - Loop prevention tightened to eliminate noreply false-drops
-- Per-sender rate limiting via a DynamoDB fixed-window counter with TTL expiry, fail-open on infrastructure errors
-- Full test suite (42 tests) with mocked AWS, Anthropic, and threat-intel boundaries
+- Per-sender (email) and per-IP (web) rate limiting via a DynamoDB fixed-window counter with TTL expiry, fail-open on infrastructure errors
+- HTTP entry path via Lambda Function URL, POST-only with a 500 KB body cap and CORS restricted to the production origin
+- Full test suite (50 tests) with mocked AWS, Anthropic, and threat-intel boundaries
 
 **Built, code-complete, not yet deployed**
-- HTTP entry path via Lambda Function URL for the web frontend (pipeline and per-IP rate limiting written and unit-tested; Function URL itself not yet created in AWS)
-- Landing page with drag-and-drop `.eml` analysis, ready to deploy to fredsprivacy.com
-- Wazuh SIEM integration: custom decoder, MITRE ATT&CK-mapped rules (T1566, T1566.001/.002, T1534), campaign-detection frequency rule, dashboard queries — deferred to a dedicated homelab session
+- Landing page with drag-and-drop `.eml` analysis (the Lambda Function URL it posts to is live; the page itself deploys to fredsprivacy.com via Cloudflare Pages)
 
 ## Roadmap
 
 **Near term**
-- Create the Lambda Function URL and deploy the landing page to fredsprivacy.com
+- Deploy the landing page to fredsprivacy.com (Cloudflare Pages)
 - SES production access to lift the sandbox recipient whitelist (rate limiting and abuse controls now in place; a live landing page strengthens the request)
 
 **Medium term**
-- Wazuh homelab integration
 - Turnstile/CAPTCHA on the web upload path if public traffic warrants it
 - Escalation-rate telemetry review to tune the confidence threshold on real traffic
 
