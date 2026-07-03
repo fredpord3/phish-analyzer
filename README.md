@@ -153,21 +153,6 @@ Every verdict produces one structured JSON log line to CloudWatch, prefixed with
 
 This format supports CloudWatch Insights queries directly (verdict distribution over time, top sender domains by phish count, DMARC pass/fail ratios, escalation rate) and feeds the Wazuh pipeline below.
 
-## Wazuh SIEM integration
-
-The `wazuh/` directory contains a working ingestion pipeline: the Wazuh AWS module polls the Lambda's CloudWatch log group, a custom decoder anchors on the `PHISH_VERDICT` marker and JSON-decodes the payload, and rules 100100-100140 raise MITRE ATT&CK-mapped alerts:
-
-| Rule | Level | Trigger | MITRE |
-|---|---|---|---|
-| 100110 | 10 | `likely_phishing` verdict | T1566 |
-| 100111 | 11 | phishing + deceptive link mismatches | T1566.002 |
-| 100112 | 12 | URL flagged by threat intelligence | T1566.002 |
-| 100113 | 10 | homoglyph brand impersonation | T1566 |
-| 100114 | 8 | DMARC failure | T1566 |
-| 100115 | 12 | phishing claiming our own domain | T1534 |
-| 100140 | 12 | 3+ phishing verdicts, same domain, 10 min | T1566 |
-
-Plus operational-health rules for `suspicious` and `unknown` verdicts. Full setup in [`wazuh/SETUP.md`](wazuh/SETUP.md).
 
 ## Case studies: false positives and what they taught me
 
