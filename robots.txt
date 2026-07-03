@@ -1,0 +1,7 @@
+# robots.txt for fredsprivacy.com
+# Fred's Privacy — phishing email analyzer
+
+# Allow all well-behaved crawlers full access.
+# This is a public portfolio project; discoverability is desired.
+User-agent: *
+Allow: /
