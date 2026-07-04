@@ -128,10 +128,25 @@ def handle_ses_event(event):
     log_verdict(parsed, enrichment, verdict, message_id, source="ses")
 
     reply_body = format_reply(verdict, parsed, enrichment)
-    send_reply(to=sender, subject=f"Re: {submission.get('Subject', 'phishing check')}",
-               body=reply_body)
+    # Strip CR/LF from the echoed subject: RFC 2047 encoded-words in a hostile
+    # submission can decode to contain newlines, and control characters in an
+    # outbound subject are rejected by SES at best, a header-injection vector
+    # at worst.
+    subject = _sanitize_reply_subject(submission.get("Subject"))
+    send_reply(to=sender, subject=f"Re: {subject}", body=reply_body)
 
     return {"statusCode": 200, "messageId": message_id}
+
+
+def _sanitize_reply_subject(subject):
+    """Make a user-supplied subject safe to echo into an outbound SES header.
+
+    RFC 2047 encoded-words in a hostile submission can decode to contain
+    CR/LF, and control characters in an outbound subject are rejected by SES
+    at best, a header-injection vector at worst. Collapse any newline runs to
+    a single space and fall back to a default if the subject is missing/empty.
+    """
+    return re.sub(r"[\r\n]+", " ", str(subject or "phishing check"))
 
 
 # ---------------------------------------------------------------------------
@@ -182,10 +197,17 @@ def handle_http_event(event):
     if not (submission.get("From") or submission.get("Subject") or submission.get("Received")):
         return _http_response(400, {"error": "That doesn't look like an email. Upload the original .eml file."})
 
-    target = extract_target_email(submission) or submission
-    parsed = parse_email(target)
-    enrichment = enrich(parsed)
-    verdict = analyze_with_claude(parsed, enrichment)
+    # Wrap the pipeline so an unexpected error returns structured JSON with
+    # CORS headers instead of Lambda's bare 502 (which has no CORS headers,
+    # so the browser surfaces it as an opaque network error).
+    try:
+        target = extract_target_email(submission) or submission
+        parsed = parse_email(target)
+        enrichment = enrich(parsed)
+        verdict = analyze_with_claude(parsed, enrichment)
+    except Exception:
+        logger.exception("http_pipeline_error")
+        return _http_response(500, {"error": "Analysis failed unexpectedly. Please try again later."})
 
     log_verdict(parsed, enrichment, verdict, message_id=f"http-{int(time.time())}", source="http")
 
@@ -213,6 +235,7 @@ def _http_response(status, payload):
         "Access-Control-Allow-Origin": os.environ.get("ALLOWED_ORIGIN", "*"),
         "Access-Control-Allow-Methods": "POST, OPTIONS",
         "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "86400",
     }
     if payload is None:
         return {"statusCode": status, "headers": headers, "body": ""}
@@ -308,6 +331,25 @@ def check_rate_limit(rate_key):
 # Parsing
 # ---------------------------------------------------------------------------
 
+def _safe_get_content(part):
+    """Extract text from a message part without letting a hostile or broken
+    charset kill the pipeline.
+
+    part.get_content() raises LookupError on charsets Python doesn't know
+    (e.g. charset="x-unknown-999"), which an attacker can set at will in a
+    submitted email. Fall back to decoding the raw payload with
+    errors="replace" - a few mangled characters beat a failed analysis.
+    """
+    try:
+        return part.get_content()
+    except Exception:
+        try:
+            raw = part.get_payload(decode=True) or b""
+            return raw.decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+
 def extract_target_email(msg):
     """If user forwarded as a .eml attachment, return that message instead."""
     for part in msg.walk():
@@ -317,7 +359,18 @@ def extract_target_email(msg):
                 return payload[0]
         filename = part.get_filename() or ""
         if filename.lower().endswith(".eml"):
-            return email.message_from_bytes(part.get_payload(decode=True), policy=policy.default)
+            # get_payload(decode=True) returns None for malformed attachments;
+            # message_from_bytes(None) would raise, and this input is
+            # attacker-controlled. Skip the broken part instead of crashing.
+            payload = part.get_payload(decode=True)
+            if not payload:
+                logger.warning("eml_attachment_payload_empty filename=%s", filename)
+                continue
+            try:
+                return email.message_from_bytes(payload, policy=policy.default)
+            except Exception as e:
+                logger.warning("eml_attachment_parse_failed: %s", e)
+                continue
     return None
 
 
@@ -335,15 +388,15 @@ def parse_email(msg):
         for part in msg.walk():
             ct = part.get_content_type()
             if ct == "text/plain" and not body:
-                body = part.get_content()
+                body = _safe_get_content(part)
             elif ct == "text/html" and not html_body:
-                html_body = part.get_content()
+                html_body = _safe_get_content(part)
     else:
         ct = msg.get_content_type()
         if ct == "text/plain":
-            body = msg.get_content()
+            body = _safe_get_content(msg)
         elif ct == "text/html":
-            html_body = msg.get_content()
+            html_body = _safe_get_content(msg)
 
     # If we only have HTML, derive a text version for the prompt
     if not body and html_body:
@@ -355,17 +408,20 @@ def parse_email(msg):
     # Pull URLs from both the text body and HTML hrefs. HTML-only emails
     # (most marketing mail, lots of phishing kits) hide their real targets
     # in <a href="..."> tags that the text-body regex never sees.
-    urls = set(URL_RE.findall(body))
+    # dict.fromkeys dedupes while preserving first-seen order, so the [:20]
+    # cap and the "first 3 get reputation-checked" cap are deterministic -
+    # a set would let insertion-order randomness decide which URLs survive.
+    found = URL_RE.findall(body)
     if html_body:
         try:
             soup = BeautifulSoup(html_body, "html.parser")
             for a in soup.find_all("a", href=True):
                 href = (a.get("href") or "").strip()
                 if href.startswith(("http://", "https://")):
-                    urls.add(href)
+                    found.append(href)
         except Exception as e:
             logger.warning("html_url_extraction_failed: %s", e)
-    urls = list(urls)[:20]
+    urls = list(dict.fromkeys(found))[:20]
 
     return {
         "from_name": from_name,
@@ -678,8 +734,11 @@ def enrich(parsed):
     # Parse the individual auth results
     dmarc_pass = "dmarc=pass" in ar
     dmarc_fail = "dmarc=fail" in ar
-    dmarc_reject_policy = "p=reject" in ar
-    dmarc_quarantine_policy = "p=quarantine" in ar
+    # Word boundary (\b) so "p=reject" never false-matches inside "sp=reject"
+    # (the SUBDOMAIN policy Gmail reports alongside p=, e.g. "p=NONE sp=REJECT").
+    # Without it, a domain with p=none sp=reject would be misread as REJECT.
+    dmarc_reject_policy = bool(re.search(r"\bp=reject", ar))
+    dmarc_quarantine_policy = bool(re.search(r"\bp=quarantine", ar))
     spf_pass = "spf=pass" in ar
     spf_fail = "spf=fail" in ar or "spf=softfail" in ar
     dkim_pass = "dkim=pass" in ar
@@ -830,6 +889,41 @@ SYSTEM_PROMPT = (
 VALID_VERDICTS = {"likely_phishing", "suspicious", "likely_legitimate", "unknown"}
 
 
+def _sanitize_verdict(verdict):
+    """Coerce model JSON into the schema every downstream path assumes.
+
+    format_reply, the HTTP JSON response, and log_verdict all index into
+    this dict without re-validating it. The model's output is untrusted:
+    confidence can come back as a string, a float, or out of range, and
+    indicators can contain non-dict entries. Clamp and coerce here so a
+    sloppy model response degrades the verdict instead of crashing the
+    reply path after the API call has already been paid for.
+    """
+    try:
+        conf = int(verdict.get("confidence", 0))
+    except (TypeError, ValueError):
+        conf = 0
+    verdict["confidence"] = max(0, min(100, conf))
+
+    indicators = verdict.get("indicators")
+    if not isinstance(indicators, list):
+        indicators = []
+    clean = []
+    for item in indicators:
+        if not isinstance(item, dict):
+            continue
+        clean.append({
+            "signal": str(item.get("signal") or "")[:200],
+            "detail": str(item.get("detail") or "")[:500],
+            "severity": str(item.get("severity") or "med")[:10],
+        })
+    verdict["indicators"] = clean
+
+    verdict["summary"] = str(verdict.get("summary") or "")
+    verdict["recommendation"] = str(verdict.get("recommendation") or "")
+    return verdict
+
+
 def _call_model(model, prompt):
     """One model call, returns a parsed verdict dict or None on unparseable output."""
     resp = claude.messages.create(
@@ -846,7 +940,7 @@ def _call_model(model, prompt):
         return None
     if not isinstance(verdict, dict) or verdict.get("verdict") not in VALID_VERDICTS:
         return None
-    return verdict
+    return _sanitize_verdict(verdict)
 
 
 def _should_escalate(verdict):
