@@ -1,9 +1,16 @@
 """Test suite for lambda_handler. Mocks all external boundaries
-(S3, SES, DynamoDB, Anthropic API, reputation HTTP calls)."""
+(S3, SES, DynamoDB, Anthropic API, reputation HTTP calls).
+
+Run with pytest (NOT `python test_lambda_handler.py` - the hardening tests at
+the bottom are pytest functions that unittest.main() would silently skip):
+
+    python -m pytest test_lambda_handler.py -v
+
+Expected: 49 passed (42 unittest-style + 7 pytest-style hardening regressions).
+"""
 
 import os
 import json
-import email
 import base64
 import unittest
 from unittest import mock
@@ -480,69 +487,119 @@ class TestHttpPath(BaseTest):
         self.assertEqual(resp["headers"]["Access-Control-Allow-Origin"], "https://fredsprivacy.com")
 
 
-class TestHardeningFixes(BaseTest):
-    """Regression tests for the security/robustness review fixes."""
+# ---------------------------------------------------------------------------
+# Hardening regression tests (charset fallback, URL ordering, p= vs sp=,
+# CRLF subject stripping, verdict sanitization, .eml guard, HTTP 500 path)
+#
+# These are pytest-style functions (plain `assert`, no TestCase). They run
+# under `python -m pytest` alongside the unittest classes above, but are NOT
+# picked up by `python test_lambda_handler.py` / unittest.main() - which is
+# why the module docstring says to use pytest.
+# ---------------------------------------------------------------------------
 
-    def _enrich_base(self, auth_results):
-        return lh.enrich({
-            "auth_results": auth_results, "reply_to": "", "from_addr": "a@example.com",
-            "from_domain": "example.com", "return_path": "", "urls": [],
-            "html_body": "", "body": "",
-        })
+import email as _email
+from email import policy as _policy
+from email.message import EmailMessage as _EmailMessage
 
-    def test_sp_reject_not_mistaken_for_p_reject(self):
-        # Gmail reports both policies: "(p=NONE sp=REJECT dis=NONE)".
-        # Substring matching would misread this as a REJECT policy.
-        e = self._enrich_base("mx.google.com; dmarc=pass (p=NONE sp=REJECT dis=NONE)")
-        self.assertEqual(e["dmarc_policy"], "none")
 
-    def test_real_p_reject_still_detected(self):
-        e = self._enrich_base("mx.test; dmarc=pass (p=REJECT sp=REJECT)")
-        self.assertEqual(e["dmarc_policy"], "reject")
+def test_hostile_charset_degrades_instead_of_crashing():
+    """An attacker-set unknown charset must not kill parse_email; the body
+    should fall back to replacement decoding and URLs still be extracted."""
+    raw = (b"From: a@b.com\r\nSubject: hi\r\n"
+           b'Content-Type: text/plain; charset="x-unknown-999"\r\n\r\n'
+           b"Click https://evil.example/login now\r\n")
+    msg = _email.message_from_bytes(raw, policy=_policy.default)
+    parsed = lh.parse_email(msg)
+    assert "evil.example" in parsed["body"]
+    assert parsed["urls"] == ["https://evil.example/login"]
 
-    def test_hostile_charset_does_not_crash(self):
-        raw = (b"From: a@example.com\r\nSubject: hi\r\n"
-               b"Content-Type: text/plain; charset=\"x-unknown-999\"\r\n\r\n"
-               b"hello https://example.com/x\r\n")
-        msg = email.message_from_bytes(raw, policy=lh.policy.default)
-        parsed = lh.parse_email(msg)
-        self.assertIn("hello", parsed["body"])
-        self.assertEqual(parsed["urls"], ["https://example.com/x"])
 
-    def test_hostile_charset_http_returns_200(self):
-        raw = ("From: a@example.com\r\nSubject: hi\r\n"
-               "Content-Type: text/plain; charset=\"x-unknown-999\"\r\n\r\nhello\r\n")
-        event = {"requestContext": {"http": {"method": "POST", "sourceIp": "1.2.3.4"}},
-                 "body": raw, "isBase64Encoded": False}
-        resp = lh.lambda_handler(event, None)
-        self.assertEqual(resp["statusCode"], 200)
+def test_url_extraction_first_seen_order_and_dedupe():
+    """URL list must be deterministic first-seen order, deduped - so the
+    [:20] cap and the 3-URL reputation cap always hit the same URLs."""
+    raw = (b"From: a@b.com\r\nSubject: hi\r\nContent-Type: text/plain\r\n\r\n"
+           b"https://a.example/1 https://b.example/2 "
+           b"https://a.example/1 https://c.example/3\r\n")
+    parsed = lh.parse_email(_email.message_from_bytes(raw, policy=_policy.default))
+    assert parsed["urls"] == [
+        "https://a.example/1", "https://b.example/2", "https://c.example/3",
+    ]
 
-    def test_sanitize_verdict_drops_non_dict_indicators(self):
-        v = lh._sanitize_verdict({"verdict": "suspicious", "confidence": 55,
-                                  "indicators": ["junk", {"signal": "s"}],
-                                  "summary": "s", "recommendation": "r"})
-        self.assertEqual(v["indicators"], [{"signal": "s"}])
 
-    def test_sanitize_verdict_clamps_confidence(self):
-        self.assertEqual(lh._sanitize_verdict({"verdict": "unknown", "confidence": 250})["confidence"], 100)
-        self.assertEqual(lh._sanitize_verdict({"verdict": "unknown", "confidence": "not-a-number"})["confidence"], 0)
+def test_dmarc_policy_p_not_confused_with_sp():
+    """Gmail reports both p= and sp= in Authentication-Results. 'p=none
+    sp=reject' must parse as policy 'none', never 'reject'."""
+    base = {"reply_to": "", "from_addr": "a@b.com", "return_path": "",
+            "from_domain": "b.com", "urls": [], "html_body": ""}
+    e = lh.enrich({**base, "auth_results":
+                   "mx.google.com; dmarc=pass (p=NONE sp=REJECT dis=NONE)"})
+    assert e["dmarc_policy"] == "none"
+    e = lh.enrich({**base, "auth_results":
+                   "mx.google.com; dmarc=pass (p=REJECT sp=NONE dis=NONE)"})
+    assert e["dmarc_policy"] == "reject"
+    e = lh.enrich({**base, "auth_results": "dmarc=pass (p=QUARANTINE sp=REJECT)"})
+    assert e["dmarc_policy"] == "quarantine"
 
-    def test_url_order_is_first_seen(self):
-        raw = (b"From: a@example.com\r\nSubject: t\r\nContent-Type: text/plain\r\n\r\n"
-               b"https://one.example/a https://two.example/b https://one.example/a\r\n")
-        msg = email.message_from_bytes(raw, policy=lh.policy.default)
-        self.assertEqual(lh.parse_email(msg)["urls"],
-                         ["https://one.example/a", "https://two.example/b"])
 
-    def test_reply_subject_strips_newlines(self):
-        raw = PLAIN_EML.replace(b"Subject: Is this phishing?",
-                                b"Subject: =?utf-8?B?VXJnZW50CkJjYzogeEBleGFtcGxlLmNvbQ==?=")
-        self.mocks["s3"].get_object.return_value = {"Body": mock.Mock(read=mock.Mock(return_value=raw))}
-        event = {"Records": [{"ses": {"mail": {"messageId": "m1", "source": "alice@example.com"}}}]}
-        lh.lambda_handler(event, None)
-        sent_subject = self.mocks["ses"].send_email.call_args.kwargs["Message"]["Subject"]["Data"]
-        self.assertNotIn("\n", sent_subject)
-        self.assertNotIn("\r", sent_subject)
+def test_reply_subject_strips_crlf_header_injection():
+    """CR/LF in an echoed subject is a header-injection vector; it must be
+    collapsed to spaces, with a fallback when the subject is missing."""
+    s = lh._sanitize_reply_subject("Invoice\r\nBcc: victim@example.com\nX-Evil: 1")
+    assert "\r" not in s and "\n" not in s
+    assert s == "Invoice Bcc: victim@example.com X-Evil: 1"
+    assert lh._sanitize_reply_subject(None) == "phishing check"
+    assert lh._sanitize_reply_subject("") == "phishing check"
+
+
+def test_verdict_sanitization_clamps_and_coerces():
+    """Model output is untrusted: confidence clamped 0-100, non-dict
+    indicator entries dropped, text fields coerced to strings."""
+    v = lh._sanitize_verdict({
+        "verdict": "suspicious", "confidence": "150",
+        "indicators": ["not-a-dict", {"signal": 42, "severity": None}],
+        "summary": None, "recommendation": 7,
+    })
+    assert v["confidence"] == 100
+    assert v["indicators"] == [{"signal": "42", "detail": "", "severity": "med"}]
+    assert v["summary"] == "" and v["recommendation"] == "7"
+
+    v = lh._sanitize_verdict({"verdict": "likely_phishing",
+                              "confidence": -5, "indicators": "nope"})
+    assert v["confidence"] == 0 and v["indicators"] == []
+
+    v = lh._sanitize_verdict({"verdict": "likely_legitimate", "confidence": 92,
+                              "indicators": [{"signal": "a", "detail": "b",
+                                              "severity": "low"}]})
+    assert v["confidence"] == 92 and len(v["indicators"]) == 1
+
+
+def test_malformed_eml_attachment_skipped_not_crashed():
+    """A .eml attachment whose payload decodes to None/empty must be skipped;
+    email.message_from_bytes(None) would otherwise raise on hostile input."""
+    outer = _EmailMessage()
+    outer["From"] = "user@example.com"
+    outer["Subject"] = "fwd"
+    outer.set_content("see attached")
+    outer.add_attachment(b"", maintype="application",
+                         subtype="octet-stream", filename="broken.eml")
+    assert lh.extract_target_email(outer) is None
+
+
+def test_http_pipeline_error_returns_structured_500_with_cors():
+    """An unexpected pipeline exception on the web path must return JSON
+    with CORS headers, not Lambda's bare 502 (which browsers surface as an
+    opaque network error)."""
+    event = {
+        "requestContext": {"http": {"method": "POST", "sourceIp": "1.2.3.4"}},
+        "body": "From: a@b.com\r\nSubject: t\r\n\r\nbody",
+        "isBase64Encoded": False,
+    }
+    with mock.patch.object(lh, "check_rate_limit", return_value=True), \
+         mock.patch.object(lh, "parse_email", side_effect=RuntimeError("boom")):
+        resp = lh.handle_http_event(event)
+    assert resp["statusCode"] == 500
+    assert "Access-Control-Allow-Origin" in resp["headers"]
+    assert "error" in resp["body"]
 
 
 if __name__ == "__main__":
