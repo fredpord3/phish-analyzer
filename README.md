@@ -254,7 +254,6 @@ The suite catches regressions before a change ever reaches Lambda — every fix 
 
 **Near term**
 - SES production access to lift the sandbox recipient whitelist (rate limiting, abuse controls, and a live landing page are all now in place to strengthen the request)
-- Push the current handler and test suite to the repository so the published source matches production
 
 **Medium term**
 - Turnstile/CAPTCHA on the web upload path if public traffic warrants it
@@ -264,7 +263,6 @@ The suite catches regressions before a change ever reaches Lambda — every fix 
 - Attachment analysis (hash lookups against VirusTotal for attached files)
 - Per-user history: "you've asked about this sender before"
 - Digit-for-letter (leet) lookalike heuristic to complement Unicode confusables detection
-- Wazuh homelab integration for SIEM-side alerting (separate homelab project)
 
 ## License
 
