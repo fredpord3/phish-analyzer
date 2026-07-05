@@ -810,7 +810,7 @@ class TestHistory(BaseTest):
 # These are pytest-style functions (plain `assert`, no TestCase). They run
 # under `python -m pytest` alongside the unittest classes above, but are NOT
 # picked up by `python test_lambda_handler.py` / unittest.main() - which is
-# why the module docstring says to use pytest.
+# why the module docstring says to use pytest. FP
 # ---------------------------------------------------------------------------
 
 import email as _email
