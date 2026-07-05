@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fred's Privacy — AI Phishing Email Analyzer</title>
+<meta name="description" content="Drop in a suspicious email and get a verdict in seconds. Header authentication analysis, threat-intelligence link checks, and AI content review.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0B0F14;            /* deep slate, not pure black */
+    --bg-raise:#121821;      /* raised panels */
+    --bg-card:#161E29;       /* cards */
+    --line:#243040;          /* hairlines */
+    --text:#E8EDF2;
+    --text-dim:#9AA7B4;
+    --accent:#FF6B1A;        /* signal orange */
+    --accent-soft:rgba(255,107,26,.12);
+    --ok:#3DDC84;
+    --warn:#FFC24B;
+    --bad:#FF5C5C;
+    --info:#5CC8FF;
+    --display:'Space Grotesk',system-ui,sans-serif;
+    --body:'Inter',system-ui,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  @media (prefers-reduced-motion:reduce){
+    html{scroll-behavior:auto}
+    *,*::before,*::after{animation:none!important;transition:none!important}
+  }
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family:var(--body);
+    font-size:16px;
+    line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--info);text-decoration:none}
+  a:hover{text-decoration:underline}
+  a:focus-visible,button:focus-visible,label:focus-within,[tabindex]:focus-visible{
+    outline:2px solid var(--accent);outline-offset:3px;border-radius:2px;
+  }
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+
+  /* ---------- Nav ---------- */
+  nav{
+    position:sticky;top:0;z-index:50;
+    background:rgba(11,15,20,.85);
+    backdrop-filter:blur(12px);
+    border-bottom:1px solid var(--line);
+  }
+  .nav-inner{display:flex;align-items:center;gap:28px;height:64px}
+  .brand{font-family:var(--display);font-weight:700;font-size:17px;letter-spacing:.01em;color:var(--text)}
+  .brand:hover{text-decoration:none}
+  .brand span{color:var(--accent)}
+  .nav-links{display:flex;gap:22px;margin-left:auto;align-items:center}
+  .nav-links a{font-size:14px;color:var(--text-dim);font-weight:500}
+  .nav-links a:hover{color:var(--text);text-decoration:none}
+  .btn{
+    display:inline-block;
+    font-family:var(--display);font-weight:600;font-size:15px;
+    background:var(--accent);color:#0B0F14;
+    border:1px solid var(--accent);border-radius:6px;
+    padding:9px 20px;cursor:pointer;
+    transition:filter .15s;
+  }
+  .btn:hover{filter:brightness(1.12);text-decoration:none}
+  .btn.ghost{background:transparent;color:var(--text);border-color:var(--line)}
+  .btn.ghost:hover{border-color:var(--text-dim)}
+  @media(max-width:720px){.nav-links a:not(.btn){display:none}}
+
+  /* ---------- Hero ---------- */
+  .hero{position:relative;padding:88px 0 40px;overflow:hidden}
+  .hero::before{
+    content:"";position:absolute;inset:-40% -20% auto;height:140%;
+    background:
+      radial-gradient(600px 420px at 78% 8%, rgba(255,107,26,.14), transparent 65%),
+      radial-gradient(520px 360px at 12% 30%, rgba(92,200,255,.07), transparent 60%);
+    pointer-events:none;
+  }
+  .eyebrow{
+    font-family:var(--mono);font-size:12px;font-weight:600;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--accent);
+    margin-bottom:18px;
+  }
+  h1{
+    font-family:var(--display);font-weight:700;
+    font-size:clamp(34px,6vw,60px);
+    line-height:1.06;letter-spacing:-.02em;
+    max-width:16ch;margin-bottom:20px;position:relative;
+  }
+  .hero .lede{max-width:58ch;color:var(--text-dim);font-size:17px;margin-bottom:30px;position:relative}
+  .hero .lede strong{color:var(--text)}
+  .hero-ctas{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:56px;position:relative}
+
+  /* ---------- Analyzer panel ---------- */
+  .panel{
+    position:relative;
+    background:var(--bg-raise);
+    border:1px solid var(--line);
+    border-radius:12px;
+    padding:32px;
+    box-shadow:0 24px 60px rgba(0,0,0,.45);
+  }
+  .panel-label{
+    font-family:var(--mono);font-size:12px;font-weight:600;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--text-dim);
+    display:flex;align-items:center;gap:10px;margin-bottom:20px;
+  }
+  .live-dot{width:8px;height:8px;border-radius:50%;background:var(--ok);
+    box-shadow:0 0 0 0 rgba(61,220,132,.5);animation:pulse 2.4s infinite}
+  @keyframes pulse{
+    0%{box-shadow:0 0 0 0 rgba(61,220,132,.45)}
+    70%{box-shadow:0 0 0 9px rgba(61,220,132,0)}
+    100%{box-shadow:0 0 0 0 rgba(61,220,132,0)}
+  }
+  .dropzone{
+    border:1.5px dashed var(--line);
+    border-radius:8px;
+    padding:44px 20px;
+    text-align:center;
+    cursor:pointer;
+    transition:border-color .15s,background .15s;
+    display:block;
+  }
+  .dropzone:hover{border-color:var(--text-dim)}
+  .dropzone.dragover{border-color:var(--accent);background:var(--accent-soft)}
+  .dropzone p{font-family:var(--display);font-weight:600;font-size:17px}
+  .dropzone .hint{font-family:var(--body);font-weight:400;font-size:14px;color:var(--text-dim);margin-top:8px}
+  .dropzone input{position:absolute;width:1px;height:1px;opacity:0}
+  .alt-row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-top:16px;font-size:14px;color:var(--text-dim)}
+  button.linkish{
+    background:none;border:none;cursor:pointer;
+    font-family:var(--body);font-size:14px;
+    color:var(--info);text-decoration:underline;padding:2px;
+  }
+  textarea{
+    display:none;width:100%;min-height:180px;margin-top:14px;
+    font-family:var(--mono);font-size:13px;line-height:1.5;
+    border:1px solid var(--line);border-radius:8px;padding:14px;
+    background:var(--bg);color:var(--text);resize:vertical;
+  }
+  textarea.open{display:block}
+  textarea::placeholder{color:#5A6672}
+  .actions{margin-top:16px;display:none}
+  .actions.open{display:block}
+  .fineprint{font-size:13px;color:var(--text-dim);max-width:70ch;margin-top:22px}
+
+  /* ---------- Result card ---------- */
+  #result{display:none;margin-top:24px}
+  .card{
+    background:var(--bg-card);
+    border:1px solid var(--line);
+    border-radius:12px;
+    padding:28px 32px;
+  }
+  .verdict-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+  .verdict-badge{
+    font-family:var(--display);font-weight:700;
+    font-size:clamp(17px,2.6vw,22px);
+    letter-spacing:.06em;text-transform:uppercase;
+    padding:8px 18px;border-radius:6px;
+    border:1px solid currentColor;
+  }
+  .verdict-badge.likely_legitimate{color:var(--ok);background:rgba(61,220,132,.08)}
+  .verdict-badge.suspicious,.verdict-badge.unknown{color:var(--warn);background:rgba(255,194,75,.08)}
+  .verdict-badge.likely_phishing{color:var(--bad);background:rgba(255,92,92,.08)}
+  .conf{font-family:var(--mono);font-size:13px;color:var(--text-dim);letter-spacing:.05em}
+  .summary{margin-bottom:18px;max-width:64ch;color:var(--text)}
+  .chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}
+  .chip{
+    font-family:var(--mono);font-size:12px;font-weight:500;
+    border:1px solid var(--line);border-radius:4px;
+    padding:4px 10px;letter-spacing:.04em;color:var(--text-dim);
+  }
+  .chip.pass{border-color:rgba(61,220,132,.5);color:var(--ok)}
+  .chip.fail{border-color:rgba(255,92,92,.5);color:var(--bad)}
+  table.indicators{width:100%;border-collapse:collapse;font-size:14px;margin-bottom:18px}
+  table.indicators td{border-top:1px solid var(--line);padding:10px 10px 10px 0;vertical-align:top;color:var(--text-dim)}
+  table.indicators td strong{color:var(--text)}
+  td.sev{font-family:var(--mono);font-size:11px;font-weight:600;white-space:nowrap;letter-spacing:.08em;padding-right:16px}
+  td.sev.high{color:var(--bad)}
+  td.sev.med{color:var(--warn)}
+  td.sev.low{color:var(--text-dim)}
+  .rec{
+    border-left:3px solid var(--accent);
+    padding:10px 16px;background:var(--accent-soft);
+    font-size:15px;max-width:68ch;border-radius:0 6px 6px 0;
+  }
+  .rec strong{color:var(--text)}
+  .meta{font-family:var(--mono);font-size:11px;color:var(--text-dim);margin-top:16px;letter-spacing:.03em}
+  .error-card{border-color:rgba(255,92,92,.5)}
+  .error-card p{color:var(--bad);font-family:var(--mono);font-size:14px}
+
+  /* ---------- Stats strip ---------- */
+  .stats{border-top:1px solid var(--line);border-bottom:1px solid var(--line);
+    background:var(--bg-raise);margin-top:72px}
+  .stats-inner{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0}
+  .stat{padding:30px 24px;border-left:1px solid var(--line)}
+  .stat:first-child{border-left:none}
+  .stat b{display:block;font-family:var(--display);font-weight:700;font-size:30px;letter-spacing:-.01em}
+  .stat span{font-size:13px;color:var(--text-dim)}
+  @media(max-width:720px){.stat{border-left:none;border-top:1px solid var(--line)}.stat:first-child{border-top:none}}
+
+  /* ---------- Sections ---------- */
+  section{padding:88px 0}
+  .section-eyebrow{
+    font-family:var(--mono);font-size:12px;font-weight:600;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:14px;
+  }
+  h2{
+    font-family:var(--display);font-weight:700;
+    font-size:clamp(26px,4vw,38px);line-height:1.15;letter-spacing:-.015em;
+    max-width:24ch;margin-bottom:14px;
+  }
+  .section-lede{color:var(--text-dim);max-width:62ch;margin-bottom:44px}
+
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:20px}
+  .feature{
+    background:var(--bg-card);
+    border:1px solid var(--line);
+    border-radius:12px;
+    padding:28px;
+    transition:border-color .15s,transform .15s;
+  }
+  .feature:hover{border-color:#33445A;transform:translateY(-2px)}
+  .feature .slash{
+    font-family:var(--mono);font-weight:600;font-size:13px;
+    letter-spacing:.12em;text-transform:uppercase;color:var(--accent);
+    margin-bottom:14px;
+  }
+  .feature h3{font-family:var(--display);font-weight:600;font-size:19px;margin-bottom:10px}
+  .feature p{font-size:14.5px;color:var(--text-dim)}
+
+  /* ---------- Turnstile ---------- */
+  .turnstile-box{margin-top:14px;min-height:65px}
+  .turnstile-box[hidden]{display:none}
+
+  /* ---------- Pipeline ---------- */
+  /* All 5 steps share one row on desktop; wrap to a grid on narrower screens */
+  .pipe{display:grid;grid-template-columns:repeat(5,1fr);gap:14px;counter-reset:step}
+  @media(max-width:960px){.pipe{grid-template-columns:repeat(2,1fr)}}
+  @media(max-width:560px){.pipe{grid-template-columns:1fr}}
+  .step{
+    background:var(--bg-card);border:1px solid var(--line);border-radius:12px;
+    padding:24px;position:relative;
+  }
+  .step::before{
+    counter-increment:step;content:"0" counter(step);
+    font-family:var(--mono);font-size:12px;font-weight:600;color:var(--accent);
+    letter-spacing:.1em;display:block;margin-bottom:12px;
+  }
+  .step h3{font-family:var(--display);font-weight:600;font-size:16px;margin-bottom:8px}
+  .step p{font-size:13.5px;color:var(--text-dim)}
+  .pipe-note{font-family:var(--mono);font-size:12.5px;color:var(--text-dim);margin-top:22px;letter-spacing:.02em}
+  .pipe-note b{color:var(--info);font-weight:500}
+
+  /* ---------- CTA band ---------- */
+  .cta-band{
+    background:linear-gradient(140deg, #14202E 0%, #0F1620 55%, rgba(255,107,26,.10) 130%);
+    border-top:1px solid var(--line);border-bottom:1px solid var(--line);
+    text-align:center;padding:80px 24px;
+  }
+  .cta-band h2{margin:0 auto 12px}
+  .cta-band p{color:var(--text-dim);margin-bottom:28px}
+  .cta-band .mono{font-family:var(--mono);color:var(--text)}
+
+  /* ---------- Footer ---------- */
+  footer{padding:36px 0 48px;font-size:14px;color:var(--text-dim)}
+  footer .wrap{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top">FRED'S<span>/</span>PRIVACY</a>
+    <div class="nav-links">
+      <a href="#coverage">What gets checked</a>
+      <a href="#pipeline">How it runs</a>
+      <a href="https://github.com/fredpord3/phish-analyzer">GitHub</a>
+      <a class="btn" href="#analyzer">Check an email</a>
+    </div>
+  </div>
+</nav>
+
+<header class="hero" id="top">
+  <div class="wrap">
+    <div class="eyebrow">/ AI phishing analysis</div>
+    <h1>Not sure that email is real? Get a verdict.</h1>
+    <p class="lede">Drop in a suspicious email and this tool inspects what senders can't fake — <strong>SPF, DKIM, and DMARC authentication</strong> — checks every link against threat-intelligence databases, then has an AI read the content for social-engineering patterns. Verdict in about ten seconds.</p>
+    <div class="hero-ctas">
+      <a class="btn" href="#analyzer">Analyze an email</a>
+      <a class="btn ghost" href="#pipeline">See how it works</a>
+    </div>
+
+    <div class="panel" id="analyzer">
+      <div class="panel-label"><span class="live-dot" aria-hidden="true"></span> Live analyzer</div>
+      <label class="dropzone" id="dropzone" for="fileInput" tabindex="0">
+        <p>Drop the .eml file here, or click to choose</p>
+        <p class="hint">In most mail apps: download the message or use "Show original" &rarr; save as .eml</p>
+        <input type="file" id="fileInput" accept=".eml,message/rfc822,.txt">
+      </label>
+      <div class="alt-row">
+        <span>No file?</span>
+        <button class="linkish" id="pasteToggle" type="button">Paste the raw email source instead</button>
+        <span>&middot;</span>
+        <span>Or forward it to <a href="mailto:check@fredsprivacy.com">check@fredsprivacy.com</a></span>
+      </div>
+      <textarea id="pasteBox" spellcheck="false" aria-label="Raw email source" placeholder="Paste the full raw source — headers included — from your mail app's 'Show original' / 'View source' option."></textarea>
+      <div class="actions" id="pasteActions">
+        <button class="btn" id="analyzeBtn" type="button">Analyze email</button>
+      </div>
+      <div id="turnstileBox" class="turnstile-box" hidden></div>
+      <div id="result" aria-live="polite"></div>
+      <p class="fineprint">The email you submit is processed by AWS and analyzed by Anthropic's Claude. Don't submit messages containing passwords, financial details, or personal data you wouldn't share with a cloud service. Results are advisory &mdash; when real money or credentials are at stake, verify with the sender through a channel you already trust.</p>
+    </div>
+  </div>
+</header>
+
+<div class="stats">
+  <div class="wrap stats-inner">
+    <div class="stat"><b>~20s</b><span>typical time to verdict</span></div>
+    <div class="stat"><b>3</b><span>threat-intel feeds: VirusTotal, urlscan.io, PhishTank</span></div>
+    <div class="stat"><b>2</b><span>AI models &mdash; fast first pass, stronger second opinion</span></div>
+    <div class="stat"><b>86</b><span>automated tests behind every deploy</span></div>
+  </div>
+</div>
+
+<section id="coverage">
+  <div class="wrap">
+    <div class="section-eyebrow">/ Coverage</div>
+    <h2>Three layers of inspection, one verdict</h2>
+    <p class="section-lede">Deterministic checks establish the facts. Threat intelligence corroborates them. AI reads for intent. No single layer decides alone.</p>
+    <div class="cards">
+      <div class="feature">
+        <div class="slash">/ Headers</div>
+        <h3>Authentication analysis</h3>
+        <p>SPF, DKIM, and DMARC results, weighted the way mail servers actually trust them: DMARC is the senior signal, and a DKIM failure on legitimately forwarded mail won't trigger a false alarm.</p>
+      </div>
+      <div class="feature">
+        <div class="slash">/ Links</div>
+        <h3>URL &amp; domain reputation</h3>
+        <p>Every URL is extracted &mdash; including ones hidden in HTML &mdash; and checked for shorteners, IP-literal hosts, anchor-text bait, homoglyph lookalikes of major brands, and known-malicious reputation in VirusTotal, urlscan.io, and PhishTank.</p>
+      </div>
+      <div class="feature">
+        <div class="slash">/ Content</div>
+        <h3>AI intent review</h3>
+        <p>An AI model reads the message for the patterns humans fall for: manufactured urgency, authority impersonation, credential prompts, and payment redirection &mdash; grounded in the header facts, not overruled by them.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="pipeline" style="padding-top:0">
+  <div class="wrap">
+    <div class="section-eyebrow">/ Pipeline</div>
+    <h2>How a verdict gets made</h2>
+    <p class="section-lede">Serverless end to end: your email enters via SES or this page's upload, and one Lambda function runs the whole pipeline.</p>
+    <div class="pipe">
+      <div class="step"><h3>Ingest</h3><p>Email arrives via SES or the web upload. Rate limits and loop protection run before anything else touches it.</p></div>
+      <div class="step"><h3>Parse</h3><p>Headers, body, and every URL are extracted &mdash; from plain text and from HTML anchor tags where phishing kits hide targets.</p></div>
+      <div class="step"><h3>Enrich</h3><p>SPF/DKIM/DMARC weighting, sender-alignment checks, lookalike-domain detection, and threat-intel lookups produce hard signals.</p></div>
+      <div class="step"><h3>Analyze</h3><p>Claude Haiku reads content against the hard signals; uncertain verdicts escalate to Claude Sonnet for a second opinion.</p></div>
+      <div class="step"><h3>Verdict</h3><p>A structured verdict &mdash; tier, confidence, indicators, recommendation &mdash; returns by email reply or right here as JSON.</p></div>
+    </div>
+    <p class="pipe-note">SES &rarr; S3 &rarr; <b>Lambda</b> (Python 3.13) &rarr; header analysis + URL reputation + <b>Claude Haiku 4.5 / Sonnet</b> &rarr; verdict &rarr; reply / JSON &rarr; CloudWatch telemetry</p>
+  </div>
+</section>
+
+<div class="cta-band">
+  <h2>Trust your inbox again.</h2>
+  <p>Check it here, or forward the suspicious email as an attachment to <span class="mono">check@fredsprivacy.com</span>.</p>
+  <a class="btn" href="#analyzer">Analyze an email</a>
+</div>
+
+<footer>
+  <div class="wrap">
+    <span>Built by Fred Pordum as a serverless security engineering project.</span>
+    <span style="display:flex;gap:20px;flex-wrap:wrap">
+      <a href="/privacy.html">Privacy</a>
+      <a href="/terms.html">Terms</a>
+      <a href="https://github.com/fredpord3/phish-analyzer">Source on GitHub &rarr;</a>
+    </span>
+  </div>
+</footer>
+
+<script>
+const API_URL = "https://juxw3ch37vtkkuzfzslortfqna0vpbek.lambda-url.us-east-1.on.aws/";
+
+// Cloudflare Turnstile (optional). Paste your SITE key here after creating a
+// widget at dash.cloudflare.com -> Turnstile. Leave empty ("") to disable —
+// the page works exactly as before. The SECRET key goes in the Lambda's
+// TURNSTILE_SECRET_KEY env var, never in this file.
+const TURNSTILE_SITE_KEY = "0x4AAAAAADvyTYX8mZY0jGuJ";
+
+let turnstileWidgetId = null;
+window.onTurnstileLoad = function () {
+  const box = document.getElementById("turnstileBox");
+  if (!TURNSTILE_SITE_KEY || !window.turnstile || !box) return;
+  box.hidden = false;
+  turnstileWidgetId = turnstile.render(box, {
+    sitekey: TURNSTILE_SITE_KEY,
+    theme: "dark",
+    action: "analyze_email",
+  });
+};
+if (TURNSTILE_SITE_KEY) {
+  const s = document.createElement("script");
+  s.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?onload=onTurnstileLoad&render=explicit";
+  s.async = true; s.defer = true;
+  document.head.appendChild(s);
+}
+
+const dropzone = document.getElementById("dropzone");
+const fileInput = document.getElementById("fileInput");
+const pasteToggle = document.getElementById("pasteToggle");
+const pasteBox = document.getElementById("pasteBox");
+const pasteActions = document.getElementById("pasteActions");
+const analyzeBtn = document.getElementById("analyzeBtn");
+const result = document.getElementById("result");
+
+pasteToggle.addEventListener("click", () => {
+  pasteBox.classList.toggle("open");
+  pasteActions.classList.toggle("open");
+  if (pasteBox.classList.contains("open")) pasteBox.focus();
+});
+
+["dragover", "dragenter"].forEach(ev =>
+  dropzone.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.add("dragover"); }));
+["dragleave", "drop"].forEach(ev =>
+  dropzone.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.remove("dragover"); }));
+
+dropzone.addEventListener("drop", e => {
+  const f = e.dataTransfer.files && e.dataTransfer.files[0];
+  if (f) readAndAnalyze(f);
+});
+dropzone.addEventListener("keydown", e => {
+  if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInput.click(); }
+});
+fileInput.addEventListener("change", () => {
+  if (fileInput.files[0]) readAndAnalyze(fileInput.files[0]);
+});
+analyzeBtn.addEventListener("click", () => {
+  const text = pasteBox.value.trim();
+  if (!text) { showError("Paste the raw email source first — headers and all."); return; }
+  analyze(text);
+});
+
+function readAndAnalyze(file) {
+  if (file.size > 500000) { showError("That file is over the 500 KB limit. Most emails are far smaller — make sure you saved the message itself, not an export with attachments."); return; }
+  const reader = new FileReader();
+  reader.onload = () => analyze(reader.result);
+  reader.onerror = () => showError("Couldn't read that file. Try saving the email again as .eml.");
+  reader.readAsText(file);
+}
+
+async function analyze(rawEmail) {
+  if (!API_URL) {
+    showError("This page isn't wired to the analyzer yet — set API_URL in the page source to your Lambda Function URL. You can still forward emails to check@fredsprivacy.com.");
+    return;
+  }
+  setBusy(true);
+  showInfo("Inspecting headers, checking links, reading content…");
+  const headers = { "Content-Type": "text/plain" };
+  if (TURNSTILE_SITE_KEY) {
+    const token = (window.turnstile && turnstileWidgetId !== null)
+      ? turnstile.getResponse(turnstileWidgetId) : "";
+    if (!token) {
+      setBusy(false);
+      showError("Please complete the verification checkbox below the Analyze button first.");
+      return;
+    }
+    headers["X-Turnstile-Token"] = token;
+  }
+  try {
+    const resp = await fetch(API_URL, {
+      method: "POST",
+      headers: headers,
+      body: rawEmail,
+    });
+    let data = null;
+    try { data = await resp.json(); } catch (_) {}
+    if (resp.status === 429) { showError("You've hit the hourly limit from this connection. Try again in an hour."); return; }
+    if (resp.status === 403) { showError((data && data.error) || "Human verification failed — complete the checkbox and try again."); return; }
+    if (!resp.ok) { showError((data && data.error) || "The analyzer couldn't process that. Check that you uploaded the original .eml with headers intact."); return; }
+    renderVerdict(data);
+  } catch (_) {
+    showError("Couldn't reach the analyzer. Check your connection and try again.");
+  } finally {
+    setBusy(false);
+    // Turnstile tokens are single-use — reset so the next analysis gets a fresh one.
+    if (TURNSTILE_SITE_KEY && window.turnstile && turnstileWidgetId !== null) {
+      try { turnstile.reset(turnstileWidgetId); } catch (_) {}
+    }
+  }
+}
+
+function setBusy(b) {
+  analyzeBtn.disabled = b;
+  analyzeBtn.textContent = b ? "Analyzing…" : "Analyze email";
+}
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g,
+    c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+
+function showError(msg) {
+  result.style.display = "block";
+  result.innerHTML = '<div class="card error-card"><p>' + esc(msg) + "</p></div>";
+  result.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+function showInfo(msg) {
+  result.style.display = "block";
+  result.innerHTML = '<div class="card"><p class="summary">' + esc(msg) + "</p></div>";
+}
+
+function chip(label, value) {
+  const cls = value === "pass" ? "pass" : value === "fail" ? "fail" : "";
+  return '<span class="chip ' + cls + '">' + esc(label) + ": " + esc(value || "none") + "</span>";
+}
+
+function renderVerdict(d) {
+  const v = d.verdict || "unknown";
+  const badgeText = { likely_phishing: "Likely phishing", suspicious: "Suspicious",
+                      likely_legitimate: "Likely legitimate", unknown: "Inconclusive" }[v] || "Inconclusive";
+  const a = d.analyzed || {};
+  const rows = (d.indicators || []).map(i =>
+    "<tr><td class='sev " + esc((i.severity || "low").toLowerCase()) + "'>" +
+    esc((i.severity || "?").toUpperCase()) + "</td><td><strong>" + esc(i.signal || "") +
+    "</strong> — " + esc(i.detail || "") + "</td></tr>").join("");
+
+  result.style.display = "block";
+  result.innerHTML =
+    '<div class="card">' +
+      '<div class="verdict-row">' +
+        '<span class="verdict-badge ' + esc(v) + '">' + esc(badgeText) + '</span>' +
+        '<span class="conf">' + esc(d.confidence ?? 0) + '% confidence</span>' +
+      '</div>' +
+      '<p class="summary">' + esc(d.summary || "") + "</p>" +
+      '<div class="chips">' +
+        chip("DMARC", a.dmarc) + chip("DKIM", a.dkim) + chip("SPF", a.spf) +
+        '<span class="chip">links found: ' + esc(a.url_count ?? 0) + "</span>" +
+        (a.attachment_count ? '<span class="chip">attachments: ' + esc(a.attachment_count) + "</span>" : "") +
+      "</div>" +
+      (d.history && d.history.prior_lookups > 0
+        ? '<p class="summary" style="margin-top:10px;font-size:14px;color:var(--text-dim)">You\'ve checked this sender ' +
+          esc(d.history.prior_lookups) + (d.history.prior_lookups === 1 ? " time" : " times") + " before" +
+          (d.history.last_verdict ? " — last verdict: " + esc(String(d.history.last_verdict).replace(/_/g, " ")) : "") + ".</p>"
+        : "") +
+      (rows ? '<table class="indicators"><tbody>' + rows + "</tbody></table>" : "") +
+      '<div class="rec"><strong>What to do:</strong> ' + esc(d.recommendation || "When in doubt, don't click links or reply.") + "</div>" +
+      '<p class="meta">analyzed: ' + esc(a.from || "unknown sender") + ' · "' + esc(a.subject || "") + '"' +
+      (d.escalated ? " · escalated to a stronger model for a second read" : "") +
+      " · advisory only, not a guarantee</p>" +
+    "</div>";
+  result.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+</script>
+</body>
+</html>
