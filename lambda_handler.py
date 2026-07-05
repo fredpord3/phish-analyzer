@@ -25,6 +25,15 @@ Optional env vars:
                               triggers (default 70)
   ALLOWED_ORIGIN            - CORS origin for the HTTP path (default "*";
                               set to "https://fredsprivacy.com" in production)
+  TURNSTILE_SECRET_KEY      - Cloudflare Turnstile secret. When set, the HTTP
+                              path requires a valid Turnstile token in the
+                              X-Turnstile-Token request header. Unset = the
+                              CAPTCHA check is disabled (SES path is never
+                              affected).
+  ENABLE_SUBMITTER_HISTORY  - "true" enables per-submitter history ("you've
+                              asked about this sender before"), stored in the
+                              shared DynamoDB table with a 90-day TTL
+                              (default "false")
 """
 
 import os
@@ -74,12 +83,43 @@ MAX_HTTP_BODY_BYTES = 500_000    # ~500 KB is generous for an .eml
 
 URL_RE = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 
+# Attachment analysis
+ATTACHMENT_MAX_PARTS = 5         # cap how many attachments get hashed/checked
+ATTACHMENT_MAX_BYTES = 5_000_000 # skip hashing anything bigger than 5 MB
+# Extensions that are executable or commonly abused for HTML-smuggling /
+# script droppers. Flagged deterministically regardless of hash reputation.
+RISKY_ATTACHMENT_EXTS = {
+    ".exe", ".scr", ".pif", ".com", ".msi", ".bat", ".cmd", ".ps1",
+    ".js", ".jse", ".vbs", ".vbe", ".wsf", ".hta", ".jar", ".iso",
+    ".img", ".lnk", ".html", ".htm", ".shtml", ".svg", ".xll",
+}
+
+# Per-submitter history
+HISTORY_TTL_SECONDS = 90 * 86400  # remember sender lookups for 90 days
+
+# Cloudflare Turnstile server-side verification endpoint
+TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+
 # Brands worth checking for lookalike/homoglyph impersonation.
 # Tune to your threat model - add the brands your users actually interact with.
+# Note: every inbound email's sender domain is compared against each entry,
+# so keep the list focused on brands that actually get impersonated - each
+# addition is a small per-email cost in the confusables check.
 WATCHED_BRANDS = [
+    # Tech / cloud
     "microsoft.com", "google.com", "apple.com", "amazon.com",
+    "docusign.com", "dropbox.com", "adobe.com", "netflix.com",
+    "facebook.com", "instagram.com", "linkedin.com", "github.com",
+    "zoom.us", "okta.com",
+    # Banks / finance
     "paypal.com", "chase.com", "bankofamerica.com", "wellsfargo.com",
-    "docusign.com", "dropbox.com",
+    "citi.com", "capitalone.com", "usbank.com", "americanexpress.com",
+    "fidelity.com", "schwab.com", "venmo.com", "coinbase.com",
+    "intuit.com", "adp.com",
+    # Shipping / logistics / gov-adjacent (constant phishing lures)
+    "fedex.com", "ups.com", "usps.com", "dhl.com", "irs.gov", "ssa.gov",
+    # Retail
+    "ebay.com", "walmart.com", "costco.com", "target.com",
 ]
 
 
@@ -127,7 +167,11 @@ def handle_ses_event(event):
 
     log_verdict(parsed, enrichment, verdict, message_id, source="ses")
 
-    reply_body = format_reply(verdict, parsed, enrichment)
+    # Optional history note ("you've asked about this sender before"),
+    # keyed to the submitting address. Fail-open; None when disabled.
+    history = get_and_record_history(sender, parsed["from_domain"], verdict.get("verdict"))
+
+    reply_body = format_reply(verdict, parsed, enrichment, history=history)
     # Strip CR/LF from the echoed subject: RFC 2047 encoded-words in a hostile
     # submission can decode to contain newlines, and control characters in an
     # outbound subject are rejected by SES at best, a header-injection vector
@@ -169,6 +213,15 @@ def handle_http_event(event):
         return _http_response(405, {"error": "Use POST with the raw email (.eml) as the request body."})
 
     source_ip = http_ctx.get("sourceIp", "unknown")
+
+    # Turnstile check runs before the rate limiter on purpose: a bot probing
+    # without a token shouldn't be able to burn through the hourly budget of
+    # a legitimate user behind the same NAT/office IP.
+    turnstile = verify_turnstile(event, source_ip)
+    if not turnstile["ok"]:
+        logger.info("Turnstile rejected request from %s reason=%s", source_ip, turnstile["reason"])
+        return _http_response(403, {"error": "Human verification failed. Refresh the page and try again."})
+
     if not check_rate_limit(f"ip#{source_ip}"):
         logger.info("HTTP rate limit exceeded for %s", source_ip)
         return _http_response(429, {"error": "Rate limit exceeded. Try again in an hour."})
@@ -211,6 +264,10 @@ def handle_http_event(event):
 
     log_verdict(parsed, enrichment, verdict, message_id=f"http-{int(time.time())}", source="http")
 
+    # Web-path history is keyed to the source IP - the closest thing to a
+    # stable submitter identity a browser upload has. None when disabled.
+    history = get_and_record_history(source_ip, parsed["from_domain"], verdict.get("verdict"))
+
     return _http_response(200, {
         "verdict": verdict.get("verdict", "unknown"),
         "confidence": verdict.get("confidence", 0),
@@ -219,10 +276,12 @@ def handle_http_event(event):
         "recommendation": verdict.get("recommendation", ""),
         "model": verdict.get("model", PRIMARY_MODEL),
         "escalated": verdict.get("escalated", False),
+        "history": history,
         "analyzed": {
             "from": parsed["from_addr"],
             "subject": parsed["subject"],
             "url_count": len(parsed["urls"]),
+            "attachment_count": len(parsed.get("attachments") or []),
             "spf": enrichment["spf"],
             "dkim": enrichment["dkim"],
             "dmarc": enrichment["dmarc"],
@@ -230,11 +289,59 @@ def handle_http_event(event):
     })
 
 
+def verify_turnstile(event, source_ip):
+    """Server-side Cloudflare Turnstile verification for the web path.
+
+    Enabled by setting TURNSTILE_SECRET_KEY. The frontend widget produces a
+    single-use token which the page sends in the X-Turnstile-Token header;
+    this function validates it against Cloudflare's siteverify endpoint.
+
+    Returns {"ok": bool, "reason": str}.
+
+    Failure semantics:
+    - Turnstile disabled (no secret configured): always ok. The SES path is
+      never gated - CAPTCHA only makes sense for browsers.
+    - Token missing or Cloudflare says invalid: NOT ok -> caller returns 403.
+    - The siteverify call itself errors (timeout, Cloudflare outage): fail
+      OPEN, consistent with every other external dependency in this pipeline.
+      The IP rate limiter still backstops abuse, and a Cloudflare blip should
+      not take the analyzer down. Logged loudly either way.
+    """
+    secret = os.environ.get("TURNSTILE_SECRET_KEY")
+    if not secret:
+        return {"ok": True, "reason": "disabled"}
+
+    # Function URL events lowercase all header names
+    headers = event.get("headers") or {}
+    token = (headers.get("x-turnstile-token") or "").strip()
+    if not token:
+        return {"ok": False, "reason": "missing_token"}
+    if len(token) > 2048:  # Turnstile tokens are well under this; cap hostile input
+        return {"ok": False, "reason": "oversized_token"}
+
+    try:
+        resp = http.request(
+            "POST",
+            TURNSTILE_VERIFY_URL,
+            fields={"secret": secret, "response": token, "remoteip": source_ip},
+        )
+        if resp.status != 200:
+            logger.error("turnstile_verify_http_error status=%s - failing open", resp.status)
+            return {"ok": True, "reason": "verify_unavailable_fail_open"}
+        data = json.loads(resp.data.decode())
+        if data.get("success"):
+            return {"ok": True, "reason": "verified"}
+        return {"ok": False, "reason": ",".join(data.get("error-codes") or ["invalid"])}
+    except Exception as e:
+        logger.error("turnstile_verify_error: %s - failing open", e)
+        return {"ok": True, "reason": "verify_error_fail_open"}
+
+
 def _http_response(status, payload):
     headers = {
         "Access-Control-Allow-Origin": os.environ.get("ALLOWED_ORIGIN", "*"),
         "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Allow-Headers": "Content-Type, X-Turnstile-Token",
         "Access-Control-Max-Age": "86400",
     }
     if payload is None:
@@ -374,6 +481,53 @@ def extract_target_email(msg):
     return None
 
 
+def extract_attachments(msg):
+    """Collect metadata + SHA-256 for real attachments on the analyzed message.
+
+    Only parts that present as attachments count: an explicit attachment
+    content-disposition or a filename. The inline text/html bodies and
+    message/rfc822 forward wrappers are the *message*, not attachments, and
+    are skipped. Capped at ATTACHMENT_MAX_PARTS parts, and anything over
+    ATTACHMENT_MAX_BYTES is recorded but not hashed (hashing a hostile 100 MB
+    blob inside a Lambda time/memory budget is its own denial of service).
+
+    Everything here is defensive: this input is attacker-controlled, so any
+    part that fails to decode is recorded with what we know and skipped.
+    """
+    attachments = []
+    try:
+        for part in msg.walk():
+            if len(attachments) >= ATTACHMENT_MAX_PARTS:
+                break
+            ct = part.get_content_type()
+            if part.is_multipart() or ct == "message/rfc822":
+                continue
+            filename = part.get_filename() or ""
+            disposition = (part.get_content_disposition() or "").lower()
+            if disposition != "attachment" and not filename:
+                continue  # inline body part, not an attachment
+
+            entry = {
+                "filename": filename[:200],
+                "content_type": ct,
+                "size": None,
+                "sha256": None,
+                "ext": os.path.splitext(filename.lower())[1] if filename else "",
+            }
+            try:
+                payload = part.get_payload(decode=True)
+                if payload:
+                    entry["size"] = len(payload)
+                    if len(payload) <= ATTACHMENT_MAX_BYTES:
+                        entry["sha256"] = hashlib.sha256(payload).hexdigest()
+            except Exception as e:
+                logger.warning("attachment_decode_failed filename=%s: %s", filename, e)
+            attachments.append(entry)
+    except Exception as e:
+        logger.warning("attachment_walk_failed: %s", e)
+    return attachments
+
+
 def parse_email(msg):
     """Pull the fields that actually matter for phishing analysis."""
     from_name, from_addr = parseaddr(msg.get("From", ""))
@@ -435,6 +589,7 @@ def parse_email(msg):
         "body": body,
         "html_body": html_body,
         "urls": urls,
+        "attachments": extract_attachments(msg),
     }
 
 
@@ -489,21 +644,69 @@ def extract_link_mismatches(html_body):
     return mismatches
 
 
-def detect_lookalike_domain(from_domain):
-    """Check if from_domain is a homoglyph/confusable of a watched brand.
+# Digit -> letter substitutions phishers actually use. '1' is ambiguous
+# (both 'l' and 'i'), so it's handled separately with both variants.
+_LEET_UNAMBIGUOUS = str.maketrans({
+    "0": "o", "3": "e", "4": "a", "5": "s", "7": "t", "8": "b", "9": "g", "2": "z",
+})
 
-    Catches Unicode lookalike attacks (e.g. 'paypa1.com', 'micr0soft.com',
-    or Cyrillic 'а' substituted for Latin 'a'). Exact matches against the
-    watched brand list are returned as None - those are the real thing.
+
+def _leet_candidates(domain):
+    """Expand a domain's digit substitutions into plausible letter-only forms.
+
+    'paypa1.com' -> {'paypal.com', 'paypai.com'}; 'micr0soft.com' ->
+    {'microsoft.com'}. '1' expands to both 'l' and 'i' variants (all-l and
+    all-i, which covers real-world abuse without a combinatorial blowup).
+    Returns an empty set when the domain contains no digits - no point
+    comparing a digit-free domain against itself.
+    """
+    if not any(ch.isdigit() for ch in domain):
+        return set()
+    base = domain.translate(_LEET_UNAMBIGUOUS)
+    return {base.replace("1", "l"), base.replace("1", "i")}
+
+
+def detect_leet_lookalike(from_domain):
+    """ASCII digit-swap lookalikes (paypa1.com, micr0soft.com).
+
+    Complements the Unicode confusables check below: digit/letter pairs like
+    1/l and 0/o are NOT Unicode confusables, so confusable_homoglyphs never
+    catches them (a documented limitation until now). Deterministic and
+    dependency-free: normalize digits to letters and compare against the
+    watched-brand list. Exact brand matches never reach this function -
+    detect_lookalike_domain returns early for those.
+    """
+    for candidate in _leet_candidates(from_domain):
+        if candidate != from_domain and candidate in WATCHED_BRANDS:
+            return {"suspect": from_domain, "resembles": candidate, "method": "leet"}
+    return None
+
+
+def detect_lookalike_domain(from_domain):
+    """Check if from_domain is a lookalike of a watched brand.
+
+    Two detectors, cheapest first:
+    1. Leet/digit substitution ('paypa1.com', 'micr0soft.com') - pure ASCII
+       swaps that Unicode confusables data does not cover.
+    2. Unicode homoglyphs/confusables (Cyrillic 'а' for Latin 'a', etc.)
+       via confusable_homoglyphs.
+
+    Exact matches against the watched brand list return None - those are
+    the real thing.
     """
     if not from_domain:
         return None
+    if from_domain in WATCHED_BRANDS:
+        return None  # exact match, legitimate
+
+    leet = detect_leet_lookalike(from_domain)
+    if leet:
+        return leet
+
     for brand in WATCHED_BRANDS:
-        if from_domain == brand:
-            return None  # exact match, legitimate
         try:
             if confusables.is_confusable(from_domain, greedy=True, preferred_aliases=[brand]):
-                return {"suspect": from_domain, "resembles": brand}
+                return {"suspect": from_domain, "resembles": brand, "method": "unicode"}
         except Exception:
             continue
     return None
@@ -677,6 +880,92 @@ def _check_phishtank(url):
         return None
 
 
+def _check_virustotal_filehash(sha256):
+    """VirusTotal v3 file report by SHA-256. Returns dict or None.
+
+    Report lookup only - the file itself is NEVER uploaded anywhere. Hash
+    lookups leak nothing about the content (a hash is not reversible), which
+    matters for a tool that handles other people's email attachments.
+    """
+    api_key = os.environ.get("VIRUSTOTAL_API_KEY")
+    if not api_key:
+        return None
+    try:
+        resp = http.request(
+            "GET",
+            f"https://www.virustotal.com/api/v3/files/{sha256}",
+            headers={
+                "x-apikey": api_key,
+                "User-Agent": "phish-analyzer/1.0 (+https://fredsprivacy.com)",
+            },
+        )
+        if resp.status == 404:
+            return {"service": "virustotal", "known": False, "flagged": False}
+        if resp.status != 200:
+            logger.warning("virustotal_filehash_failed status=%s", resp.status)
+            return None
+        stats = (json.loads(resp.data.decode())
+                 .get("data", {}).get("attributes", {})
+                 .get("last_analysis_stats", {}))
+        malicious = int(stats.get("malicious", 0))
+        suspicious = int(stats.get("suspicious", 0))
+        return {
+            "service": "virustotal",
+            "known": True,
+            "malicious_votes": malicious,
+            "suspicious_votes": suspicious,
+            "flagged": malicious > 0 or suspicious > 1,
+        }
+    except Exception as e:
+        logger.warning("virustotal_filehash_error: %s", e)
+        return None
+
+
+def check_attachment_reputation(attachments):
+    """Hash-based threat-intel on attachments, same asymmetric-evidence rules
+    as URLs: a hit is strong evidence, absence proves nothing (novel malware
+    is never in the database). Cached in DynamoDB under a 'filehash#' prefix
+    (namespaced away from 'urlrep#' and the rate-limit keys), 24h TTL,
+    fully fail-open.
+    """
+    if not os.environ.get("VIRUSTOTAL_API_KEY"):
+        return []
+    results = []
+    for att in attachments:
+        sha256 = att.get("sha256")
+        if not sha256:
+            continue
+        cache_key = f"filehash#{sha256}"
+        cached = None
+        try:
+            item = rate_limit_table.get_item(Key={"pk": cache_key}).get("Item")
+            if item and "result" in item:
+                cached = json.loads(item["result"])
+        except Exception as e:
+            logger.warning("filehash_cache_get_failed: %s", e)
+        if cached is not None:
+            results.append(cached)
+            continue
+
+        check = _check_virustotal_filehash(sha256)
+        entry = {
+            "filename": att.get("filename"),
+            "sha256": sha256,
+            "checks": [check] if check else [],
+            "flagged": bool(check and check.get("flagged")),
+        }
+        try:
+            rate_limit_table.put_item(Item={
+                "pk": cache_key,
+                "result": json.dumps(entry),
+                "expires_at": int(time.time()) + REPUTATION_CACHE_TTL,
+            })
+        except Exception as e:
+            logger.warning("filehash_cache_put_failed: %s", e)
+        results.append(entry)
+    return results
+
+
 def check_url_reputation(urls):
     """Run configured reputation services against up to REPUTATION_MAX_URLS.
 
@@ -828,6 +1117,27 @@ def enrich(parsed):
         signals.append(("info",
                         "URL reputation checked against configured threat-intel services; no known-malicious hits (note: new phishing URLs are often not yet in any database)"))
 
+    # Attachment signals: risky extensions are deterministic evidence on
+    # their own; hash reputation follows the same asymmetric rule as URLs.
+    attachments = parsed.get("attachments") or []
+    risky_atts = [a for a in attachments if a.get("ext") in RISKY_ATTACHMENT_EXTS]
+    if risky_atts:
+        names = ", ".join(a.get("filename") or a.get("content_type") or "?" for a in risky_atts[:3])
+        signals.append(("attachment",
+                        f"Attachment with executable/script/smuggling-prone file type: {names} - "
+                        f"legitimate senders rarely attach these; treat as high risk"))
+
+    attachment_reputation = check_attachment_reputation(attachments)
+    flagged_atts = [r for r in attachment_reputation if r.get("flagged")]
+    if flagged_atts:
+        names = ", ".join(r.get("filename") or r.get("sha256", "")[:12] for r in flagged_atts[:3])
+        signals.append(("reputation",
+                        f"Attachment hash flagged by VirusTotal as known malware: {names}"))
+    elif attachment_reputation:
+        signals.append(("info",
+                        "Attachment hashes checked against VirusTotal; no known-malware hits "
+                        "(note: novel malware is often not yet in any database)"))
+
     return {
         "signals": signals,
         "dmarc": "pass" if dmarc_pass else ("fail" if dmarc_fail else "none"),
@@ -838,7 +1148,78 @@ def enrich(parsed):
         "lookalike": lookalike,
         "url_reputation": url_reputation,
         "url_rep_flagged_count": len(flagged_urls),
+        "attachments": attachments,
+        "attachment_reputation": attachment_reputation,
+        "attachment_rep_flagged_count": len(flagged_atts),
+        "risky_attachment_count": len(risky_atts),
     }
+
+
+# ---------------------------------------------------------------------------
+# Per-submitter history ("you've asked about this sender before")
+# ---------------------------------------------------------------------------
+
+def get_and_record_history(submitter, sender_domain, verdict_tier):
+    """Track how often a given submitter has asked about a given sender domain.
+
+    Returns {"prior_lookups": int, "last_verdict": str|None} - the state
+    BEFORE this submission - or None when disabled/inapplicable, so callers
+    can distinguish "first time" (prior_lookups=0) from "feature off".
+
+    Privacy: the submitter identity (email address on the SES path, source IP
+    on the web path) is stored only as a truncated SHA-256, never verbatim -
+    consistent with the verdict-log policy of never persisting full sender
+    addresses. Keys live in the shared DynamoDB table under a 'history#'
+    prefix with a 90-day TTL.
+
+    Simple get-then-put rather than an atomic counter: this is a courtesy
+    note, not a security control, and a lost increment under a race is
+    harmless. Fully fail-open - a DynamoDB error means no history note,
+    never a failed analysis.
+    """
+    if os.environ.get("ENABLE_SUBMITTER_HISTORY", "false").lower() != "true":
+        return None
+    if not submitter or not sender_domain:
+        return None
+
+    submitter_hash = hashlib.sha256(submitter.strip().lower().encode()).hexdigest()[:32]
+    pk = f"history#{submitter_hash}#{sender_domain}"
+
+    prior = {"prior_lookups": 0, "last_verdict": None}
+    try:
+        item = rate_limit_table.get_item(Key={"pk": pk}).get("Item")
+        if item:
+            try:
+                prior["prior_lookups"] = int(item.get("lookup_count", 0))
+            except (TypeError, ValueError):
+                prior["prior_lookups"] = 0
+            prior["last_verdict"] = item.get("last_verdict")
+    except Exception as e:
+        logger.warning("history_get_failed: %s", e)
+
+    try:
+        rate_limit_table.put_item(Item={
+            "pk": pk,
+            "lookup_count": prior["prior_lookups"] + 1,
+            "last_verdict": str(verdict_tier or "unknown"),
+            "expires_at": int(time.time()) + HISTORY_TTL_SECONDS,
+        })
+    except Exception as e:
+        logger.warning("history_put_failed: %s", e)
+
+    return prior
+
+
+def format_history_note(history):
+    """One plain-English line for the reply email, or '' when not applicable."""
+    if not history or not history.get("prior_lookups"):
+        return ""
+    n = history["prior_lookups"]
+    times = "once before" if n == 1 else f"{n} times before"
+    note = f"You've asked about this sender {times}"
+    if history.get("last_verdict"):
+        note += f" (last verdict: {str(history['last_verdict']).replace('_', ' ')})"
+    return note + "."
 
 
 # ---------------------------------------------------------------------------
@@ -1051,6 +1432,9 @@ HEADERS:
 URLS FOUND IN BODY:
 {chr(10).join('  - ' + u for u in parsed['urls']) or '  (none)'}
 
+ATTACHMENTS:
+{chr(10).join('  - ' + (a.get('filename') or '(unnamed)') + ' (' + (a.get('content_type') or '?') + ', ' + str(a.get('size') or '?') + ' bytes)' for a in (parsed.get('attachments') or [])) or '  (none)'}
+
 BODY (truncated to 8000 chars):
 \"\"\"
 {parsed['body']}
@@ -1074,7 +1458,7 @@ Do not include any text outside the JSON object."""
 # Output
 # ---------------------------------------------------------------------------
 
-def format_reply(verdict, parsed, enrichment):
+def format_reply(verdict, parsed, enrichment, history=None):
     v = verdict.get("verdict", "unknown")
     conf = verdict.get("confidence", 0)
 
@@ -1086,14 +1470,18 @@ def format_reply(verdict, parsed, enrichment):
         for i in verdict.get("indicators", [])
     ) or "  (none reported)"
 
+    history_line = format_history_note(history)
+    history_block = f"\n{history_line}\n" if history_line else ""
+
     return f"""{emoji} Verdict: {v.replace('_',' ').upper()}  ({conf}% confidence)
 
 {verdict.get('summary','')}
-
+{history_block}
 What we looked at:
   Analyzed sender: {parsed['from_addr']}
   Subject: {parsed['subject']}
   URLs found: {len(parsed['urls'])}
+  Attachments: {len(parsed.get('attachments') or [])}
 
 Indicators:
 {indicators_txt}
@@ -1140,7 +1528,11 @@ def log_verdict(parsed, enrichment, verdict, message_id, source="ses"):
             "url_count": len(parsed.get("urls") or []),
             "link_mismatch_count": len(enrichment.get("link_mismatches") or []),
             "lookalike_brand": lookalike.get("resembles"),
+            "lookalike_method": lookalike.get("method"),
             "url_rep_flagged_count": enrichment.get("url_rep_flagged_count", 0),
+            "attachment_count": len(parsed.get("attachments") or []),
+            "risky_attachment_count": enrichment.get("risky_attachment_count", 0),
+            "attachment_rep_flagged_count": enrichment.get("attachment_rep_flagged_count", 0),
             "model": verdict.get("model"),
             "escalated": verdict.get("escalated", False),
             "verdict": verdict.get("verdict"),
@@ -1161,3 +1553,4 @@ def send_reply(to, subject, body):
             "Body": {"Text": {"Data": body}},
         },
     )
+
