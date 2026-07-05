@@ -1,269 +1,226 @@
 # Phish Analyzer
 
-Serverless phishing email analyzer. Forward a suspicious email — or drop the `.eml` on the web page — and get back a structured verdict with confidence score, indicators of compromise, and a recommendation in seconds.
+AI-assisted phishing email analysis, serverless end to end. Forward a suspicious
+email to **check@fredsprivacy.com** or upload it at
+**[fredsprivacy.com](https://www.fredsprivacy.com)** and get a structured verdict
+in about ten seconds.
 
-Combines deterministic header analysis (SPF, DKIM, DMARC, URL extraction, sender alignment, lookalike-domain detection, HTML link-mismatch detection), threat-intelligence URL reputation (VirusTotal, urlscan.io, PhishTank), and LLM-based content review with hybrid model routing (Claude Haiku 4.5, escalating to Sonnet when unsure). Verdict telemetry flows to CloudWatch as structured JSON, queryable directly in CloudWatch Insights.
-
-Live at [www.fredsprivacy.com](https://www.fredsprivacy.com).
+Built by Fred Pordum as a security engineering project. The design principle:
+deterministic header analysis and threat intelligence establish the facts, an
+AI model reads for social-engineering intent, and no single layer decides alone.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    A[User forwards .eml] --> B[SES Inbound]
-    W[Web upload at www.fredsprivacy.com] --> U[Lambda Function URL]
-    B --> C[S3 raw email]
-    B --> D[Lambda - Python 3.13]
-    U --> D
-    C --> D
-    D --> R[Rate limit check - DynamoDB]
-    R --> E[Parse + enrich headers]
-    E --> T[URL reputation - VT / urlscan / PhishTank]
-    T --> F[Claude Haiku 4.5]
-    F -->|low confidence| F2[Claude Sonnet 4.6]
-    F --> G[Structured JSON verdict]
-    F2 --> G
-    G --> H[SES Outbound reply / JSON response]
-    D --> I[CloudWatch verdict logs]
+    A[Email via SES] --> S3[(S3)]
+    B[Web upload<br>fredsprivacy.com] --> FURL[Lambda Function URL]
+    S3 --> L[Lambda - Python 3.13]
+    FURL --> L
+    L --> P[Parse<br>headers, body, URLs, attachments]
+    P --> E[Enrich<br>SPF/DKIM/DMARC, lookalikes,<br>link mismatches, threat intel]
+    E --> M[Claude Haiku 4.5<br>escalates to Sonnet 4.6]
+    M --> V[Structured verdict]
+    V --> R1[SES email reply]
+    V --> R2[JSON to browser]
+    V --> CW[CloudWatch PHISH_VERDICT telemetry]
+    L <--> D[(DynamoDB<br>rate limits, caches, history)]
 ```
 
-## How it works
+Two entry paths, one pipeline:
 
-Two entry paths feed one pipeline:
+1. **SES path** — email arrives at check@fredsprivacy.com, SES drops the raw
+   `.eml` in S3 and triggers the Lambda, which parses, enriches, analyzes, and
+   replies by email.
+2. **HTTP path** — the landing page POSTs a raw `.eml` to a Lambda Function
+   URL; same pipeline, JSON response.
 
-**Email path.** User forwards a suspicious email as a `.eml` attachment to the check address. Amazon SES writes the raw RFC 822 source to S3 under `inbound/` and triggers Lambda. Lambda runs loop/bounce detection (rejecting its own replies, mailer-daemon bounces, RFC 3834 auto-responders, and bulk-mail markers), then enforces a per-sender rate limit before any parsing or model call. The verdict comes back as an email reply.
+## What gets checked
 
-**Web path.** The landing page at www.fredsprivacy.com POSTs the raw `.eml` to a Lambda Function URL. The same pipeline runs — rate limited per source IP instead of per sender — and the verdict comes back as JSON, rendered in the browser. No email involved.
+- **Authentication** — SPF, DKIM, and DMARC, weighted the way mail servers
+  actually trust them. DMARC is the senior signal because it reflects the
+  sender's own published DNS policy; a DKIM failure on legitimately forwarded
+  mail (common with forwarders, HR platforms, and ESPs) won't trigger a false
+  alarm as long as DMARC still passes.
+- **Sender alignment** — Reply-To and Return-Path domain mismatches against
+  the From domain.
+- **Lookalike domains** — checked against a watchlist of **38 major brands**
+  (tech, banks, payment, shipping, government, retail) using two methods:
+  - *Leet / digit substitution* (`paypa1.com`, `micr0soft.com`, `g00gle.com`,
+    `amaz0n.com`) via a digit->letter normalization heuristic; `1` is tried as
+    both `l` and `i`. This is the primary method — verified to catch the common
+    real-world digit-swap attacks with zero false positives against legitimate
+    domains.
+  - *Unicode confusables* (e.g. Cyrillic lookalike characters for Latin ones)
+    via `confusable_homoglyphs`, as a secondary layer. See Known limitations.
+- **URLs** — extracted from plain text *and* HTML `href`s (where phishing kits
+  hide targets), checked for shorteners, IP-literal hosts, and anchor-text
+  mismatches (`<a href="evil.example">paypal.com</a>`).
+- **URL reputation** — VirusTotal, urlscan.io, and PhishTank lookups (24h
+  DynamoDB cache, capped at 3 URLs per email, fully fail-open). A hit is strong
+  evidence; absence of a hit proves nothing, because fresh phishing URLs are
+  rarely in any database yet — and the model prompt is told exactly that.
+- **Attachments** — up to 5 attachments per email are inventoried (filename,
+  type, size, SHA-256). Executable/script/smuggling-prone extensions (`.exe`,
+  `.js`, `.iso`, `.lnk`, `.html`, `.svg`, `.xll`, ...) are flagged, and hashes
+  are checked against VirusTotal's file database — **report lookup only; the
+  file content is never uploaded anywhere**. Oversize attachments (>5 MB) are
+  recorded but not hashed.
+- **AI intent review** — Claude Haiku 4.5 reads the message against the hard
+  signals for urgency framing, credential prompts, brand impersonation, and
+  payment redirection. Uncertain verdicts optionally escalate to Claude
+  Sonnet 4.6 for a second read.
 
-The pipeline itself:
+## Abuse protections
 
-1. Extract deterministic signals: SPF/DKIM/DMARC results (with DMARC treated as the senior signal), From vs Return-Path vs Reply-To alignment, URLs from both text and HTML parts, anchor-text-vs-href link mismatches, and homoglyph/confusable lookalikes against a watchlist of commonly-impersonated brands.
-2. Check extracted URLs against configured threat-intelligence services — VirusTotal, urlscan.io, and PhishTank — with a 24-hour DynamoDB cache and a hard cap on lookups per email. Positive hits are strong evidence; absence of hits proves nothing, and the model prompt says so explicitly.
-3. Pass parsed content and enriched signals to Claude Haiku with a structured prompt defining a verdict hierarchy. If escalation is enabled and Haiku returns `suspicious` or a low-confidence verdict, the same prompt is re-run on Sonnet and the stronger model's verdict wins.
-4. Claude returns JSON with a verdict tier, a 0-100 confidence score, indicators of compromise, and a user-facing explanation.
-5. Lambda writes one structured JSON log line per verdict to CloudWatch (marked `PHISH_VERDICT` so CloudWatch Insights queries have a stable anchor) and returns the verdict through whichever channel the submission arrived on.
+- **Rate limiting** — 10 analyses/hour per sender email (SES) or source IP
+  (HTTP), atomic DynamoDB counters with TTL, fail-open so an AWS blip never
+  blocks legitimate mail.
+- **Turnstile CAPTCHA** (optional) — when `TURNSTILE_SECRET_KEY` is set, the
+  web path requires a valid Cloudflare Turnstile token in the
+  `X-Turnstile-Token` header, verified server-side against Cloudflare's
+  siteverify endpoint. Runs *before* the rate limiter so failed bots never
+  burn a NAT'd office's shared budget, and rejects before any model cost is
+  incurred. Fails open only if Cloudflare itself is unreachable (the rate
+  limiter still backstops). The SES path is never gated — CAPTCHA only makes
+  sense for browsers.
+- **Loop/bounce protection** — our own replies, mailer-daemon/postmaster
+  senders, RFC 3834 auto-responders, and bulk-precedence mail are dropped
+  before analysis. `no-reply@` senders are deliberately *not* blocked (that's
+  most of the legitimate mail people actually want checked).
+- **Hostile-input hardening** — unknown charsets, malformed `.eml`
+  attachments, header injection via RFC 2047 subjects, and sloppy model JSON
+  all degrade gracefully instead of crashing the reply path.
 
-## Tech stack
+## Per-submitter history (optional)
 
-- AWS Lambda (Python 3.13) for serverless compute, with a Function URL for the web path
-- Amazon SES for inbound mail receiving and outbound replies
-- Amazon S3 for raw email storage, with a lifecycle rule that auto-deletes inbound emails after 7 days
-- Amazon DynamoDB for per-sender/per-IP rate-limit counters and the URL-reputation cache, both with TTL-based expiry
-- CloudWatch Logs for structured verdict telemetry, with a 30-day retention policy
-- Anthropic Claude (Haiku 4.5 primary, Sonnet 4.6 escalation) for content analysis
-- VirusTotal, urlscan.io, and PhishTank for URL reputation
-- BeautifulSoup for HTML parsing (URL extraction, link-mismatch detection)
-- `confusable_homoglyphs` for Unicode lookalike detection
-- Cloudflare DNS for MX records, DKIM CNAMEs, and SPF/DMARC records; Cloudflare (Workers static assets) for the landing page
+With `ENABLE_SUBMITTER_HISTORY=true`, the analyzer remembers (for 90 days)
+that a given submitter has asked about a given sender domain before, and says
+so in the reply: *"You've asked about this sender once before (last verdict:
+likely phishing)."* Submitter identity is stored as a truncated SHA-256 hash,
+never verbatim, and the whole feature is fail-open.
 
-## Repository layout
+## Verdict output
 
-```
-lambda_handler.py                 the entire Lambda (both entry paths)
-test_lambda_handler.py            42-test suite, all external boundaries mocked
-index.html                        landing page + drag-and-drop web analyzer
-privacy.html                      privacy policy
-terms.html                        terms of service
-security.txt                      security contact (RFC 9116)
-robots.txt                        crawler policy
-README.md                         this file
-```
+Every analysis produces a structured verdict — tier
+(`likely_phishing` / `suspicious` / `likely_legitimate` / `unknown`),
+confidence, plain-English summary, indicators with severity, and a concrete
+recommendation — delivered as an email reply or JSON, and logged as a
+`PHISH_VERDICT` JSON line to CloudWatch for Insights queries and downstream
+Wazuh ingestion. Log fields include auth results, lookalike method, attachment
+counts, reputation hit counts, model used, and escalation status.
 
-## Design decisions
+## Environment variables
 
-### Why hybrid Python plus LLM?
+Required:
 
-Python handles facts: what the headers literally say, what domains literally match, whether a URL's hostname differs from its anchor text, whether a sender domain is a Unicode lookalike of a watched brand, whether a URL is in a threat-intel database. Cheap, deterministic, fast.
+| Var | Purpose |
+|---|---|
+| `ANTHROPIC_API_KEY` | Claude API key |
+| `BUCKET_NAME` | S3 bucket where SES drops raw emails |
+| `FROM_ADDRESS` | Verified SES sender for replies |
+| `REGION` | AWS region for SES (e.g. `us-east-1`) |
 
-Claude handles judgment: what the body content means in context, whether framing matches known social engineering patterns (urgency, authority impersonation, payment redirection), what a non-technical user should do next.
+Optional:
 
-Either layer alone produces weaker output. Python alone cannot reason about intent. Claude alone can be talked out of header anomalies by well-crafted prose, or can confidently misread headers it has no business interpreting. Splitting the work lets each layer handle what it is best at.
-
-### Why Haiku primary with Sonnet escalation?
-
-Cost per verdict matters when the input surface is open to the internet. Sonnet runs roughly 2.8x the cost of Haiku, and output tokens dominate the bill. Testing showed Haiku produces equivalent verdicts on the false-positive cases that drove the largest accuracy gains — where Haiku was wrong, the fix was in the prompt or the enrichment logic, not the model.
-
-Hybrid routing now exists for the remainder: when escalation is enabled (`ENABLE_MODEL_ESCALATION=true`), a `suspicious` verdict or any definite verdict below the confidence threshold is re-run on Sonnet, and Sonnet's verdict wins. `unknown` verdicts never escalate — they mean the input was insufficient, and a bigger model can't fix missing information. Escalation is best-effort: if the Sonnet call fails, the Haiku verdict still ships. The economics work because escalation only fires on the small fraction of emails where the cheap model hedges, so the blended cost stays close to Haiku-only while the hard cases get the stronger model.
-
-### Why urlscan checks tags client-side instead of filtering server-side
-
-The urlscan search API supports a `verdicts.malicious:true` filter, which looks like the obvious way to ask "has this domain been scanned and flagged malicious?" in one request. It isn't available on the free tier — urlscan returns a `403` with the message "Your current plan does not allow you to search field 'verdicts.malicious'", and it fails identically whether the API key is valid or not, which makes it easy to misdiagnose as an authentication problem.
-
-The fix: query `page.domain:"<host>"` only (unrestricted on free tier), pull back the most recent scans, and inspect each result's `task.tags` field in Python instead of asking urlscan to filter server-side. urlscan already tags scans it considers malicious with `phishing` or `malicious`; a weaker community-flagged `possiblethreat` tag is tracked but doesn't trigger a flag on its own, consistent with the asymmetric-evidence principle below.
-
-**Lesson.** A `403` from a third-party API isn't always a credentials problem. Two failure modes look identical from the outside — invalid/misconfigured auth and a plan-tier restriction on a specific query feature — and only the response body distinguishes them. Logging just the status code (`urlscan_lookup_failed status=403`) was enough to catch that something was wrong, but diagnosing why required capturing and reading the actual response body, not just the code.
-
-### Why threat-intel lookups are asymmetric evidence
-
-A VirusTotal, urlscan, or PhishTank hit on a URL is strong evidence of phishing — an external database corroborates it independently of anything the model thinks. The reverse is not true: fresh phishing URLs are rarely in any database yet, so a clean lookup proves nothing. Both the enrichment signals and the system prompt encode this asymmetry explicitly, because a model that treats "no reputation hits" as exculpatory would systematically miss zero-hour campaigns.
-
-Everything in the reputation layer fails open — a missing API key, a dead service, or a timeout just means fewer signals, never a failed analysis. Lookups are capped at three URLs per email and cached in DynamoDB for 24 hours, because the same phishing URL tends to arrive in waves and VirusTotal's free tier allows 4 requests/minute.
-
-### Why structured verdicts?
-
-The reply email and the web JSON response are rendered from the same schema, not free-form text. This means:
-
-- The verdict tier is always one of three known values: `likely_phishing`, `suspicious`, `likely_legitimate` (plus `unknown` for service failures)
-- Confidence scores are bounded 0-100
-- Indicators are a list, not a paragraph
-
-Free-form output is unparseable at scale. Structured output lets the same verdict feed an email reply, a web response, and a CloudWatch log entry without re-parsing model prose. The model's JSON is also schema-enforced on the way in: confidence is coerced to an integer and clamped 0-100, non-dict entries in the indicators list are dropped, and text fields are coerced to strings - so malformed model output degrades a verdict instead of crashing the reply path after the API call has already been paid for.
-
-### Why DMARC is the senior signal
-
-A DMARC pass means the sender's own DNS policy validated the message via SPF or DKIM alignment. That makes DMARC outcome the authoritative legitimacy signal — stronger than raw SPF or DKIM results in isolation. DKIM failure with DMARC pass is benign and routine for forwarded mail, HR platforms, marketing ESPs, and any third-party sender. The enrichment scoring and the model's system prompt both encode this hierarchy explicitly to prevent the false-positive class described in the case studies below.
-
-### Why a fixed-window DynamoDB counter for rate limiting?
-
-The rate limiter uses a single atomic `UpdateItem` with an `ADD` expression, keyed by a namespaced identity plus a fixed hourly time bucket (`sender#a@example.com#495257` for email submissions, `ip#203.0.113.9#495257` for web submissions — namespacing keeps the two spaces from ever colliding). This was chosen over a sliding window or a read-then-write counter for three reasons:
-
-- **No race conditions.** The counter increment and read happen in one atomic operation, so concurrent Lambda invocations for the same sender cannot clobber each other's count.
-- **No reset logic to maintain.** Because the time bucket is baked into the partition key, each hour gets its own row. DynamoDB TTL expires old rows automatically, so there is no scheduled cleanup job and no stale-counter drift.
-- **Fail-open on infrastructure errors.** If the DynamoDB call itself throws (throttling, transient AWS issue), the check allows the email through and logs the error loudly to CloudWatch. Fail-closed would mean a DynamoDB blip silently drops legitimate mail, which is the worse failure for a tool whose whole value is answering the user.
-
-Rate-limited email senders are dropped silently with no reply, the same policy as loop/bounce handling — a bounce or rejection reply to a high-volume sender would itself be a new abuse vector. Web submissions over the limit get an honest HTTP 429, since there's no reply-storm risk on that path.
-
-### Known limitations
-
-- **Digit-for-letter lookalikes.** The lookalike detector is built on Unicode confusables data, which catches script-substitution attacks (Cyrillic 'а' for Latin 'a') but not ASCII digit swaps like `paypa1.com` or `micr0soft.com` - those pairs aren't Unicode confusables. Documented rather than silently patched; a targeted leet-substitution heuristic is a candidate improvement.
-- **Reputation lookups are sequential.** Worst case (three URLs, three services, all timing out) adds meaningful latency inside the Lambda timeout budget. Acceptable at current volume; parallelization is the known fix if volume grows.
-- **LLM content review is advisory.** The prompt hardens against instruction injection and the deterministic signals are treated as ground truth, but no LLM-based analysis is adversarially robust in the general case. The verdict schema, auth-header logic, and threat-intel layer deliberately do not depend on the model behaving well.
-
-## Verdict telemetry
-
-Every verdict produces one structured JSON log line to CloudWatch, prefixed with a fixed `PHISH_VERDICT` marker (Lambda prepends `[INFO]`/timestamp/request-id to every logger line, so the marker gives downstream parsers a stable anchor):
-
-```json
-{
-  "event": "verdict",
-  "ts": 1735000000,
-  "source": "ses",
-  "message_id": "abc123...",
-  "sender_domain": "example.com",
-  "return_path_domain": "bounce.example.com",
-  "spf": "pass",
-  "dkim": "pass",
-  "dmarc": "pass",
-  "dmarc_policy": "reject",
-  "url_count": 4,
-  "link_mismatch_count": 0,
-  "lookalike_brand": null,
-  "url_rep_flagged_count": 0,
-  "model": "claude-haiku-4-5",
-  "escalated": false,
-  "verdict": "likely_legitimate",
-  "confidence": 92,
-  "indicator_count": 1
-}
-```
-
-This format supports CloudWatch Insights queries directly: verdict distribution over time, top sender domains by phish count, DMARC pass/fail ratios, and escalation rate. Verdict logs are retained for 30 days.
-
-## Case studies: false positives and what they taught me
-
-Real emails that the analyzer initially handled incorrectly. Each one drove a meaningful architectural change.
-
-### Case 1: JetBlue recruiting email (SAP SuccessFactors)
-
-A legitimate JetBlue recruiting email sent through SAP SuccessFactors was flagged as `suspicious` with DKIM failure cited as the primary indicator of compromise.
-
-**Why the original logic was wrong.** The message had DMARC pass with `p=REJECT`. That is a stronger trust signal than raw DKIM alignment. If a domain owner publishes `p=REJECT`, any non-aligned mail is dropped by receiving servers before it reaches an inbox. The fact that the message arrived at all means it passed alignment downstream of the original SuccessFactors hop. Flagging DKIM failure as HIGH severity in that scenario treats authentication headers as a flat checklist instead of a hierarchy.
-
-**Fix.** Rewrote the enrichment scoring to treat DMARC outcome as the senior signal. DMARC pass with strict policy now downgrades DKIM-failure severity from HIGH to INFO and adds an explicit "legitimate ESP pattern" note for the model. DKIM failure with DMARC fail or no DMARC policy remains HIGH.
-
-**Lesson.** Authentication header signals are not independent. Treating them as a flat checklist produces false positives on most legitimate corporate email, because most corporate email is sent through an ESP.
-
-### Case 2: Sonic.com marketing email (Salesforce Marketing Cloud)
-
-Same pattern. Legitimate marketing email from Sonic, sent through Salesforce Marketing Cloud, with a non-aligned DKIM signature but DMARC pass under the published policy. Initial verdict: `suspicious`.
-
-**Fix.** Same code path as Case 1.
-
-**Lesson.** ESPs are the rule, not the exception, for corporate mail. An analyzer that does not understand the ESP pattern will alarm on most of an enterprise inbox, which is the failure mode that kills user trust faster than missing a real phish.
-
-### Case 3: noreply false-positive class (loop-prevention false drop)
-
-Early loop-prevention logic dropped any submission whose sender local-part matched `noreply@`, `no-reply@`, `donotreply@`, or `do-not-reply@`. The intent was to catch the analyzer's own outbound, but those patterns are also the standard sender format for every legitimate transactional email — banks, airlines, SaaS notifications, the exact mail users most often want analyzed.
-
-**Fix.** Tightened the bounce-pattern list to true system addresses only (`mailer-daemon@`, `postmaster@`, `bounces@`, `bounce@`). Self-reply detection is now handled by the explicit `FROM_ADDRESS` and own-domain check earlier in the function, which is a stronger and more specific guard than a local-part substring match.
-
-**Lesson.** Loop prevention is a class of input filter, and input filters that over-match silently destroy real signal. The right guard is identity-based (is this *our* address?), not pattern-based.
+| Var | Purpose |
+|---|---|
+| `VIRUSTOTAL_API_KEY` | Enables VirusTotal URL **and attachment-hash** reputation |
+| `URLSCAN_API_KEY` | Enables urlscan.io domain reputation |
+| `PHISHTANK_ENABLED` / `PHISHTANK_APP_KEY` | Enables PhishTank lookups |
+| `ENABLE_MODEL_ESCALATION` | `true` = Haiku -> Sonnet escalation on low confidence |
+| `ESCALATION_CONFIDENCE` | Escalation threshold (default 70) |
+| `ALLOWED_ORIGIN` | CORS origin (set to `https://www.fredsprivacy.com` in prod) |
+| `TURNSTILE_SECRET_KEY` | Enables Turnstile CAPTCHA on the web path |
+| `ENABLE_SUBMITTER_HISTORY` | `true` = per-submitter sender history |
 
 ## Testing
 
-`test_lambda_handler.py` is a 42-test suite that exercises the analyzer's logic without touching real AWS, Anthropic, or threat-intel infrastructure. S3, SES, DynamoDB, and the Anthropic API are all mocked, so the tests run in a couple seconds and never cost money or send real mail.
-
-Run it with:
-
-```bash
-pip install pytest anthropic boto3 beautifulsoup4 confusable_homoglyphs
+```
 python -m pytest test_lambda_handler.py -v
 ```
 
-What it covers:
+**86 tests** (79 unittest-style + 7 pytest-style hardening regressions)
+covering parsing, auth-signal weighting, lookalike detection, link mismatches,
+URL and attachment reputation with caching, Turnstile gating, rate limiting,
+submitter history, escalation logic, both entry paths, and hostile-input
+regressions. All external services (DynamoDB, SES, S3, the Claude API, and
+HTTP reputation calls) are mocked — the suite runs offline in under 3 seconds.
 
-- **Parsing** — plain-text, HTML-only, and forwarded (`message/rfc822`) submissions
-- **Enrichment** — DMARC-senior scoring, HTML link-mismatch detection, lookalike/homoglyph domain detection
-- **URL reputation** — flagging on a hit, handling a 404/unknown result, cache hits vs fresh lookups, fail-open behavior when a service errors, the per-email lookup cap, and the weak-vs-strong urlscan tag distinction
-- **Model escalation** — every trigger condition (`suspicious` verdict, low-confidence definite verdict), the full escalation path, and graceful fallback to the Haiku verdict if Sonnet errors
-- **SES path** — the happy path, skipping the analyzer's own replies and bounces, correctly analyzing legitimate `noreply@` senders, rate-limit drops with fail-open behavior, and forwarded `.eml` attachments
-- **HTTP path** — CORS preflight, method restrictions, base64 vs raw POST bodies, the 400/413/429 error responses, and confirming the IP-based and sender-based rate-limit buckets never collide
-- **Hardening regressions** — DMARC policy parsing that distinguishes `p=` from `sp=` (Gmail reports both), hostile/unknown charsets that must degrade instead of crash, model-output schema sanitization (confidence clamping, non-dict indicator entries), first-seen URL ordering, and CR/LF stripping in echoed reply subjects
+## Deployment
 
-The suite catches regressions before a change ever reaches Lambda — every fix in this project was verified against the full suite before deployment, and two real production bugs (a missing DynamoDB IAM permission, and a urlscan free-tier query restriction) were caught by testing against real API responses in a way the mocked suite alone couldn't have — worth noting as a reminder that unit tests validate logic, not live infrastructure or third-party API behavior.
+**Lambda.** Dependencies are vendored into a `package/` directory and zipped
+together with the handler:
 
-## Security and cost controls
+```bash
+pip install anthropic beautifulsoup4 confusable_homoglyphs -t package/
+cp lambda_handler.py package/
+python makezip.py          # produces deploy.zip (handler at the zip root)
+aws lambda update-function-code \
+  --function-name phish-analyzer \
+  --zip-file fileb://deploy.zip
+```
 
-- IAM scoped to least privilege; deny policy blocks EC2, Bedrock, SageMaker, and other compute services unrelated to the function's purpose
-- Per-sender (email path) and per-IP (web path) rate limiting via DynamoDB atomic counters with TTL expiry; the check runs before any model call so abusive volume incurs no API cost, and fails open on infrastructure errors so a DynamoDB blip never silently drops legitimate mail
-- URL-reputation lookups capped at 3 per email, cached 24h, and fully fail-open — external API keys never sit in the critical path
-- Web path enforces a 500 KB body limit, validates the upload actually parses as an email, and restricts CORS to the production origin via `ALLOWED_ORIGIN`
-- Model output is schema-enforced before use (verdict whitelist, confidence clamped 0-100, indicator entries validated), and the analysis prompt explicitly treats email content as untrusted data - an email that tries to instruct the analyzer is itself reported as an indicator
-- Malformed and hostile inputs degrade instead of crash: unknown charsets fall back to replacement decoding, and unexpected pipeline errors on the web path return structured JSON (with CORS headers) rather than a bare 502
-- Data retention is bounded: raw inbound emails in S3 are auto-deleted after 7 days via a lifecycle rule, and CloudWatch verdict logs are retained for 30 days; verdict logs contain metadata only (sender domain, auth results, verdict) — never the email body or full sender address
-- Email authentication hardened on the domain itself: SPF published on the root, DMARC set to `p=quarantine` with aggregate reporting, and enforced HTTPS on the web origin
-- Anthropic API usage is on prepaid credits with auto-reload disabled (spend cannot exceed the loaded balance), plus a $5 monthly spend limit with email alerts at $2 and $4; escalation to Sonnet is opt-in via environment variable
-- AWS budgets at $0.01 (zero-spend tripwire) and $5 (operational ceiling) with email alerts
-- All credentials live in Lambda environment variables; nothing in source
-- Loop prevention rejects submissions from the analyzer's own address/domain, true bounce senders (`mailer-daemon`, `postmaster`, `bounces`), RFC 3834 auto-responders, and `Precedence: bulk/junk/list` headers — without over-matching on legitimate `noreply@` transactional mail
-- Errors caught at the API and SES boundaries; an Anthropic API failure returns a "service temporarily unavailable, treat with caution" reply rather than crashing the function
-- All error paths use the standard `logging` module (including `logger.exception` for unexpected errors, which captures full tracebacks to CloudWatch) for consistent observability
-- 42-test suite covering both entry paths, all filters, reputation services, and escalation logic, with every external boundary mocked (see Testing section above)
-- Published privacy policy and terms of service disclosing data handling and the advisory-only nature of verdicts
+The handler must sit at the **root** of the zip so Lambda can resolve the
+`lambda_handler.lambda_handler` entrypoint. `confusable_homoglyphs` ships its
+own JSON data files, so it must be present in the zip — bundling it via
+`pip install -t package/` handles that.
 
-## Status
+New features need no DynamoDB schema changes: history and file-hash cache
+entries live in the existing `phish-analyzer-rate-limits` table under distinct
+key prefixes (`history#`, `filehash#`, `urlrep#`), all with TTL.
 
-**Live in production and verified against real mail**
-- Core SES → S3 → Lambda → Claude → SES reply pipeline
-- URL reputation enrichment: VirusTotal and urlscan.io, with DynamoDB caching, a per-email lookup cap, and fail-open semantics. Both integrations were debugged against real API responses post-deploy — see design notes above.
-- Hybrid model routing: Haiku primary, Sonnet escalation on `suspicious` or low-confidence verdicts, confirmed triggering correctly on real traffic
-- DMARC-senior enrichment scoring with ESP-aware handling of DKIM-fail-with-DMARC-pass
-- HTML link mismatch detection (anchor text vs href hostname) via BeautifulSoup
-- Lookalike/homoglyph detection on sender domain against a watchlist of commonly-impersonated brands via `confusable_homoglyphs`
-- URL extraction from both text and HTML bodies, deduplicated
-- Structured JSON verdict logging to CloudWatch with a stable decoder anchor (`PHISH_VERDICT`) and 30-day retention
-- Loop prevention tightened to eliminate noreply false-drops
-- Per-sender (email) and per-IP (web) rate limiting via a DynamoDB fixed-window counter with TTL expiry, fail-open on infrastructure errors
-- HTTP entry path via Lambda Function URL, POST-only with a 500 KB body cap and CORS restricted to the production origin
-- Full test suite (42 tests) with mocked AWS, Anthropic, and threat-intel boundaries
-- Landing page live at www.fredsprivacy.com (Cloudflare) with drag-and-drop `.eml` analysis, published privacy policy and terms of service, security.txt, and a root→www redirect
-- S3 lifecycle expiry (7-day) on raw inbound emails; bounded data retention throughout
-- Domain email authentication hardened: root SPF, DMARC `p=quarantine` with reporting, enforced HTTPS
+**Turnstile.** Create a widget at Cloudflare dashboard -> Turnstile
+(hostnames `fredsprivacy.com` and `www.fredsprivacy.com`, Managed mode). You
+get two keys:
+
+> **Key handling.** The **site key** is public and goes in `TURNSTILE_SITE_KEY`
+> in `index.html`. The **secret key** is private and goes *only* in the Lambda's
+> `TURNSTILE_SECRET_KEY` env var — never in `index.html` or any client-side file.
+> If the secret key is ever committed or served publicly, rotate it immediately
+> from the widget's settings page. Leave both keys unset to run without CAPTCHA.
+
+Deploy the backend secret before publishing the frontend site key: once the
+Lambda requires a token, web uploads will 403 until the page that produces the
+token is live.
+
+**Frontend.** Set `ALLOWED_ORIGIN` to your canonical origin
+(`https://www.fredsprivacy.com`) and ensure the bare domain redirects to it, so
+every visitor lands on the single allowed origin. Redeploy `index.html` to
+Cloudflare after editing the constants at the top of the `<script>` block.
 
 ## Roadmap
 
-**Near term**
-- SES production access to lift the sandbox recipient whitelist (rate limiting, abuse controls, and a live landing page are all now in place to strengthen the request)
+- [x] SPF/DKIM/DMARC weighting with DMARC-senior logic
+- [x] HTML link extraction and anchor-text mismatch detection
+- [x] URL reputation (VirusTotal, urlscan.io, PhishTank) with caching
+- [x] Haiku -> Sonnet escalation on low-confidence verdicts
+- [x] Structured verdict telemetry to CloudWatch / Wazuh
+- [x] Turnstile CAPTCHA on the web upload path
+- [x] Attachment analysis (extension flagging + VirusTotal hash lookups)
+- [x] Per-submitter sender history
+- [x] Leet/digit lookalike heuristic + expanded brand watchlist (38 brands)
+- [ ] Broaden Unicode-confusable test coverage and confirm real-world coverage
+- [ ] SES production access (operational — AWS console request, not code)
+- [ ] Review escalation-rate telemetry after 30 days of production traffic
 
-**Medium term**
-- Turnstile/CAPTCHA on the web upload path if public traffic warrants it
-- Escalation-rate telemetry review to tune the confidence threshold on real traffic
+## Known limitations
 
-**Long term**
-- Attachment analysis (hash lookups against VirusTotal for attached files)
-- Per-user history: "you've asked about this sender before"
-- Digit-for-letter (leet) lookalike heuristic to complement Unicode confusables detection
+- **Unicode confusable detection is a secondary layer, not yet fully verified.**
+  The leet/digit method is the workhorse and is confirmed against common
+  attacks; the `confusable_homoglyphs` arm is present as defense-in-depth but
+  its real-world coverage across scripts still needs broader test cases (see
+  Roadmap). Unicode homoglyph attacks that slip past it are frequently caught
+  anyway by other signals (DMARC failure, link mismatches, URL reputation).
+- **Reputation is asymmetric evidence.** A threat-intel hit is meaningful; the
+  absence of one is not, and the system treats it that way by design.
+- **Advisory, not authoritative.** Verdicts assist a human decision; they are
+  not a guarantee, and the output says so.
 
-## License
+## Privacy notes
 
-MIT
+Submitted emails are processed by AWS and analyzed by Anthropic's Claude.
+Attachment contents are never uploaded to third parties — only SHA-256 hashes
+are checked. Submitter identities in the history feature are stored hashed with
+a 90-day TTL. Don't submit messages containing personal data you wouldn't share
+with a cloud service.
