@@ -682,14 +682,82 @@ def detect_leet_lookalike(from_domain):
     return None
 
 
+def _to_unicode_domain(domain):
+    """Decode punycode (IDNA) labels to their Unicode form.
+
+    Real SMTP headers carry internationalized sender domains as punycode
+    ('xn--microsft-sbh.com'), never as raw Unicode - so the SES path would
+    never see a Cyrillic character without this step. Fail-safe: malformed
+    punycode decodes to the original string, never an exception.
+    """
+    if "xn--" not in domain:
+        return domain
+    try:
+        return domain.encode("ascii").decode("idna")
+    except Exception:
+        return domain
+
+
+def _ascii_skeleton(domain):
+    """Map every non-ASCII character to its ASCII confusable, if one exists.
+
+    'microsоft.com' (Cyrillic о) -> 'microsoft.com'. Returns None when the
+    domain is pure ASCII (nothing to normalize - the leet arm owns ASCII
+    swaps) or when any non-ASCII character has no ASCII confusable (a real
+    international domain like 'münchen.de', not an impersonation attempt).
+    That asymmetry is deliberate: only domains that can be FULLY rendered
+    as an ASCII string are candidates for impersonating an ASCII brand.
+    """
+    if domain.isascii():
+        return None
+    out = []
+    for ch in domain:
+        if ch.isascii():
+            out.append(ch)
+            continue
+        replacement = None
+        try:
+            for entry in (confusables.is_confusable(ch, greedy=True) or []):
+                for h in entry.get("homoglyphs", []):
+                    cand = (h.get("c") or "")
+                    if cand and cand.isascii():
+                        replacement = cand.lower()
+                        break
+                if replacement:
+                    break
+        except Exception:
+            return None
+        if replacement is None:
+            return None
+        out.append(replacement)
+    return "".join(out)
+
+
+def detect_unicode_lookalike(from_domain):
+    """Unicode homoglyph lookalikes (Cyrillic 'о', Greek omicron, etc.).
+
+    Decode punycode first, then build an ASCII skeleton of the domain and
+    compare it against the watched-brand list - the same normalize-then-
+    compare shape as the leet arm. This replaces a previous implementation
+    that passed brand domains as confusable_homoglyphs 'preferred_aliases';
+    that parameter expects Unicode script aliases ('latin', 'cyrillic'),
+    so the old check matched nothing and never fired.
+    """
+    unicode_form = _to_unicode_domain(from_domain)
+    skeleton = _ascii_skeleton(unicode_form)
+    if skeleton and skeleton != from_domain and skeleton in WATCHED_BRANDS:
+        return {"suspect": from_domain, "resembles": skeleton, "method": "unicode"}
+    return None
+
+
 def detect_lookalike_domain(from_domain):
     """Check if from_domain is a lookalike of a watched brand.
 
     Two detectors, cheapest first:
     1. Leet/digit substitution ('paypa1.com', 'micr0soft.com') - pure ASCII
        swaps that Unicode confusables data does not cover.
-    2. Unicode homoglyphs/confusables (Cyrillic 'а' for Latin 'a', etc.)
-       via confusable_homoglyphs.
+    2. Unicode homoglyphs/confusables (Cyrillic 'а' for Latin 'a', etc.),
+       including punycode-encoded senders, via ASCII-skeleton comparison.
 
     Exact matches against the watched brand list return None - those are
     the real thing.
@@ -703,13 +771,7 @@ def detect_lookalike_domain(from_domain):
     if leet:
         return leet
 
-    for brand in WATCHED_BRANDS:
-        try:
-            if confusables.is_confusable(from_domain, greedy=True, preferred_aliases=[brand]):
-                return {"suspect": from_domain, "resembles": brand, "method": "unicode"}
-        except Exception:
-            continue
-    return None
+    return detect_unicode_lookalike(from_domain)
 
 
 # ---------------------------------------------------------------------------
@@ -1553,4 +1615,3 @@ def send_reply(to, subject, body):
             "Body": {"Text": {"Data": body}},
         },
     )
-
