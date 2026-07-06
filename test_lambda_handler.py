@@ -6,10 +6,11 @@ the bottom are pytest functions that unittest.main() would silently skip):
 
     python -m pytest test_lambda_handler.py -v
 
-Expected: 86 passed (79 unittest-style + 7 pytest-style hardening regressions).
+Expected: 95 passed (88 unittest-style + 7 pytest-style hardening regressions).
 Covers: parsing, enrichment, URL + attachment reputation, escalation, both
-entry paths, Turnstile CAPTCHA gating, leet lookalikes, submitter history,
-and the hardening regressions at the bottom.
+entry paths, Turnstile CAPTCHA gating, leet + Unicode homoglyph lookalikes
+(including punycode senders), submitter history, and the hardening
+regressions at the bottom.
 """
 
 import os
@@ -610,6 +611,125 @@ class TestLeetLookalike(BaseTest):
         self.assertTrue(any(k == "lookalike" for k, _ in e["signals"]))
 
 
+class TestUnicodeLookalike(BaseTest):
+    """Unicode homoglyph lookalikes: raw Unicode (HTTP upload path) and
+    punycode (how IDN sender domains actually arrive over SMTP on the SES
+    path).
+
+    These tests turned the README's 'coverage unverified' into a known
+    state. The original implementation passed brand domains as
+    confusable_homoglyphs preferred_aliases; that parameter expects Unicode
+    script aliases ('latin', 'cyrillic'), so the check matched nothing and
+    never fired - silently, in both directions. Detection now decodes
+    punycode, builds an ASCII skeleton of the domain (each non-ASCII char
+    mapped to its ASCII confusable), and compares against WATCHED_BRANDS.
+    """
+
+    def test_cyrillic_homoglyphs_flagged(self):
+        cases = [
+            ("micros\u043eft.com", "microsoft.com"),   # Cyrillic о (U+043E)
+            ("g\u043e\u043egle.com", "google.com"),    # two Cyrillic о
+            ("p\u0430ypal.com", "paypal.com"),         # Cyrillic а (U+0430)
+            ("\u0430pple.com", "apple.com"),           # leading Cyrillic а
+            ("ch\u0430se.com", "chase.com"),           # Cyrillic а, bank domain
+            ("amazon.\u0441om", "amazon.com"),         # Cyrillic с (U+0441) in TLD
+            ("v\u0435nmo.com", "venmo.com"),           # Cyrillic е (U+0435)
+            ("u\u0455bank.com", "usbank.com"),         # Cyrillic ѕ (U+0455, dze)
+        ]
+        for domain, brand in cases:
+            with self.subTest(domain=domain):
+                r = lh.detect_lookalike_domain(domain)
+                self.assertIsNotNone(r, f"{domain!r} was not flagged")
+                self.assertEqual(r["resembles"], brand)
+                self.assertEqual(r["suspect"], domain)
+                self.assertEqual(r["method"], "unicode")
+
+    def test_greek_omicron_flagged(self):
+        # Greek omicron (U+03BF) is visually identical to Latin o
+        r = lh.detect_lookalike_domain("micros\u03bfft.com")
+        self.assertIsNotNone(r)
+        self.assertEqual(r["resembles"], "microsoft.com")
+        self.assertEqual(r["method"], "unicode")
+
+    def test_punycode_sender_flagged(self):
+        """SMTP headers deliver IDN sender domains as punycode ('xn--'),
+        never raw Unicode - so this is the form the SES path actually sees.
+        Detection blind to punycode would be blind to the entire SES path."""
+        cases = [
+            ("xn--microsft-sbh.com", "micros\u043eft.com", "microsoft.com"),
+            ("xn--pypal-4ve.com", "p\u0430ypal.com", "paypal.com"),
+            ("xn--pple-43d.com", "\u0430pple.com", "apple.com"),
+            ("xn--ggle-55da.com", "g\u043e\u043egle.com", "google.com"),
+        ]
+        for puny, uni, brand in cases:
+            with self.subTest(punycode=puny):
+                # Fixture sanity: the punycode really decodes to the spoof
+                self.assertEqual(puny.encode("ascii").decode("idna"), uni)
+                r = lh.detect_lookalike_domain(puny)
+                self.assertIsNotNone(r, f"punycode {puny!r} ({uni!r}) not flagged")
+                self.assertEqual(r["resembles"], brand)
+                # Report what the header actually said, not the decoded form
+                self.assertEqual(r["suspect"], puny)
+                self.assertEqual(r["method"], "unicode")
+
+    def test_punycode_decode_helper(self):
+        self.assertEqual(lh._to_unicode_domain("xn--microsft-sbh.com"),
+                         "micros\u043eft.com")
+        self.assertEqual(lh._to_unicode_domain("microsoft.com"), "microsoft.com")
+
+    def test_legit_international_domains_not_flagged(self):
+        # Legitimate IDNs whose non-ASCII chars have no path to any watched
+        # brand must never flag - ü and é have no ASCII confusable skeleton.
+        for domain in ("m\u00fcnchen.de", "caf\u00e9-dumonde.com"):
+            with self.subTest(domain=domain):
+                self.assertIsNone(lh.detect_lookalike_domain(domain))
+
+    def test_ascii_domains_skip_skeleton(self):
+        """Pure-ASCII domains are the leet arm's territory; the skeleton
+        must decline them so the unicode arm can never produce ASCII false
+        positives."""
+        self.assertIsNone(lh._ascii_skeleton("paypa1.com"))
+        self.assertIsNone(lh._ascii_skeleton("google.com"))
+
+    def test_mixed_digit_and_cyrillic_known_gap(self):
+        """micr0sоft.com: digit 0 AND Cyrillic о together. The leet arm
+        can't resolve it (the Cyrillic char survives digit translation) and
+        the skeleton only rewrites non-ASCII chars, so the '0' remains and
+        the skeleton isn't a brand. Known limitation, pinned here so a
+        future fix flips this assertion deliberately, not silently."""
+        self.assertIsNone(lh.detect_lookalike_domain("micr0s\u043eft.com"))
+
+    def test_hostile_input_never_raises(self):
+        """enrich() calls detection on attacker-controlled input; garbage
+        punycode, zero-width chars, and oversized labels must not raise."""
+        hostile = [
+            "xn--",                          # bare punycode prefix
+            "xn--zzzzzzzzzzzz.com",          # undecodable punycode
+            "\u200b\u200b.com",              # zero-width spaces
+            "a" * 300 + ".com",              # oversized label
+            "\u0430" * 100 + ".com",         # long all-Cyrillic label
+            "..", ".",
+        ]
+        for domain in hostile:
+            with self.subTest(domain=repr(domain)):
+                lh.detect_lookalike_domain(domain)   # return value irrelevant
+                lh.detect_unicode_lookalike(domain)  # not crashing is the test
+
+    def test_unicode_signal_lands_in_enrichment(self):
+        """End-to-end parity with the leet enrichment test: a punycode
+        homoglyph sender must surface as a lookalike signal via
+        parse_email -> enrich, and log method='unicode'."""
+        eml = (b"From: PayPal <security@xn--pypal-4ve.com>\r\nSubject: verify\r\n"
+               b"Content-Type: text/plain\r\n\r\nverify now\r\n")
+        import email
+        from email import policy
+        parsed = lh.parse_email(email.message_from_bytes(eml, policy=policy.default))
+        e = lh.enrich(parsed)
+        self.assertEqual((e["lookalike"] or {}).get("resembles"), "paypal.com")
+        self.assertEqual((e["lookalike"] or {}).get("method"), "unicode")
+        self.assertTrue(any(k == "lookalike" for k, _ in e["signals"]))
+
+
 class TestAttachments(BaseTest):
     """Attachment extraction, risky-extension flagging, and hash reputation."""
 
@@ -810,7 +930,7 @@ class TestHistory(BaseTest):
 # These are pytest-style functions (plain `assert`, no TestCase). They run
 # under `python -m pytest` alongside the unittest classes above, but are NOT
 # picked up by `python test_lambda_handler.py` / unittest.main() - which is
-# why the module docstring says to use pytest. FP
+# why the module docstring says to use pytest.
 # ---------------------------------------------------------------------------
 
 import email as _email
