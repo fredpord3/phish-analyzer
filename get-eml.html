@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How to Get the .eml File | Fred's Privacy</title>
+<meta name="description" content="Step-by-step instructions for saving a suspicious email as a .eml file in Gmail, Outlook, Apple Mail, Yahoo, Proton Mail, and Thunderbird.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0B0F14;
+    --bg-raise:#121821;
+    --bg-card:#161E29;
+    --line:#243040;
+    --text:#E8EDF2;
+    --text-dim:#9AA7B4;
+    --accent:#FF6B1A;
+    --accent-soft:rgba(255,107,26,.12);
+    --info:#5CC8FF;
+    --warn:#FFC24B;
+    --display:'Space Grotesk',system-ui,sans-serif;
+    --body:'Inter',system-ui,sans-serif;
+    --mono:'IBM Plex Mono',ui-monospace,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:var(--bg);color:var(--text);font-family:var(--body);
+    font-size:16px;line-height:1.7;-webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--info);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:800px;margin:0 auto;padding:0 24px}
+  nav{
+    position:sticky;top:0;z-index:50;
+    background:rgba(11,15,20,.85);backdrop-filter:blur(12px);
+    border-bottom:1px solid var(--line);
+  }
+  .nav-inner{display:flex;align-items:center;gap:28px;height:64px;max-width:1080px;margin:0 auto;padding:0 24px}
+  .brand{font-family:var(--display);font-weight:700;font-size:17px;color:var(--text)}
+  .brand:hover{text-decoration:none}
+  .brand span{color:var(--accent)}
+  .nav-links{display:flex;gap:22px;margin-left:auto;align-items:center}
+  .nav-links a{font-size:14px;color:var(--text-dim);font-weight:500}
+  .nav-links a:hover{color:var(--text);text-decoration:none}
+
+  header.doc-head{padding:64px 0 32px}
+  .eyebrow{
+    font-family:var(--mono);font-size:12px;font-weight:600;
+    letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin-bottom:16px;
+  }
+  h1{
+    font-family:var(--display);font-weight:700;
+    font-size:clamp(30px,5vw,44px);line-height:1.1;letter-spacing:-.02em;margin-bottom:14px;
+  }
+  .updated{font-family:var(--mono);font-size:13px;color:var(--text-dim);letter-spacing:.03em}
+
+  main{padding-bottom:80px}
+  .callout{
+    background:var(--accent-soft);border-left:3px solid var(--accent);
+    border-radius:0 8px 8px 0;padding:18px 22px;margin:8px 0 36px;
+    color:var(--text);font-size:15px;
+  }
+  .callout strong{color:var(--text)}
+  h2{
+    font-family:var(--display);font-weight:600;
+    font-size:clamp(20px,3vw,26px);line-height:1.2;letter-spacing:-.01em;
+    margin:44px 0 14px;padding-top:8px;
+  }
+  h3{font-family:var(--display);font-weight:600;font-size:17px;margin:26px 0 8px}
+  p{color:var(--text-dim);margin-bottom:16px;max-width:70ch}
+  p strong,li strong{color:var(--text);font-weight:600}
+  ul,ol{color:var(--text-dim);margin:0 0 18px 0;padding-left:22px;max-width:70ch}
+  li{margin-bottom:10px}
+  code{font-family:var(--mono);font-size:.9em;color:var(--info);background:var(--bg-raise);padding:1px 6px;border-radius:4px}
+  .provider{
+    background:var(--bg-card);border:1px solid var(--line);border-radius:10px;
+    padding:22px 24px;margin:0 0 22px;
+  }
+  .provider h2{margin:0 0 12px;padding-top:0;font-size:20px}
+  .provider ol{margin-bottom:8px}
+  .provider p:last-child,.provider ol:last-child,.provider ul:last-child{margin-bottom:0}
+  .note{
+    font-size:14px;color:var(--text-dim);
+    border-left:2px solid var(--warn);padding-left:12px;margin-top:12px;
+  }
+  .toc{
+    background:var(--bg-raise);border:1px solid var(--line);border-radius:10px;
+    padding:18px 22px;margin:0 0 36px;
+  }
+  .toc p{margin-bottom:8px;color:var(--text);font-weight:600;font-family:var(--display)}
+  .toc ul{margin:0;list-style:none;padding-left:0;display:flex;flex-wrap:wrap;gap:6px 18px}
+  .toc li{margin:0}
+  hr{border:none;border-top:1px solid var(--line);margin:44px 0}
+  footer{padding:36px 0 48px;font-size:14px;color:var(--text-dim);border-top:1px solid var(--line)}
+  footer .wrap{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="nav-inner">
+    <a class="brand" href="/">FRED'S<span>/</span>PRIVACY</a>
+    <div class="nav-links">
+      <a href="/">Analyzer</a>
+      <a href="/privacy.html">Privacy</a>
+      <a href="/terms.html">Terms</a>
+      <a href="https://github.com/fredpord3/phish-analyzer">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<header class="doc-head">
+  <div class="wrap">
+    <div class="eyebrow">/ Guide</div>
+    <h1>How to get the .eml file</h1>
+    <p class="updated">Works with Gmail, Outlook, Apple Mail, Yahoo, Proton Mail, and Thunderbird</p>
+  </div>
+</header>
+
+<main>
+<div class="wrap">
+
+  <div class="callout">
+    <strong>Why this matters:</strong> the analyzer's strongest evidence lives in the email's hidden headers
+    (SPF, DKIM, DMARC, routing path). A screenshot or a normal inline forward throws that evidence away.
+    A <strong>.eml file</strong> is the complete original message, headers and all, and it is the best thing
+    you can submit.
+  </div>
+
+  <div class="toc">
+    <p>Jump to your mail app</p>
+    <ul>
+      <li><a href="#gmail">Gmail</a></li>
+      <li><a href="#gmail-mobile">Gmail app (phone)</a></li>
+      <li><a href="#outlook-web">Outlook.com / new Outlook</a></li>
+      <li><a href="#outlook-classic">Classic Outlook (desktop)</a></li>
+      <li><a href="#apple-mail">Apple Mail (Mac)</a></li>
+      <li><a href="#iphone-mail">iPhone / iPad Mail</a></li>
+      <li><a href="#yahoo">Yahoo Mail</a></li>
+      <li><a href="#proton">Proton Mail</a></li>
+      <li><a href="#thunderbird">Thunderbird</a></li>
+    </ul>
+  </div>
+
+  <div class="provider" id="gmail">
+    <h2>Gmail (in a web browser)</h2>
+    <ol>
+      <li>Open the suspicious email. Do not click any links inside it.</li>
+      <li>Click the <strong>three-dot menu</strong> in the top-right corner of the message (not the one at the top of the inbox).</li>
+      <li>Choose <strong>"Show original."</strong> A new tab opens with the raw message.</li>
+      <li>Click <strong>"Download Original."</strong> The file saves to your Downloads folder.</li>
+      <li>Upload that file to the <a href="/#analyzer">analyzer</a>.</li>
+    </ol>
+    <p class="note">If the file saves with a .txt extension instead of .eml, that is fine. The analyzer accepts it as-is. You can also click "Copy to clipboard" on the Show original page and use the analyzer's "Paste the raw email source" option instead.</p>
+    <p class="note">Prefer email? From the same three-dot menu, choose <strong>"Forward as attachment"</strong> and send it to <code>check@fredsprivacy.com</code>. Use this option, not a normal forward, so the original headers stay intact.</p>
+  </div>
+
+  <div class="provider" id="gmail-mobile">
+    <h2>Gmail app (iPhone or Android)</h2>
+    <p>
+      The Gmail mobile app does not offer "Show original" or "Forward as attachment." Two options:
+    </p>
+    <ol>
+      <li><strong>Use a computer</strong> and follow the Gmail steps above. This is the most reliable path.</li>
+      <li><strong>Or use your phone's browser:</strong> open <code>gmail.com</code> in Chrome or Safari, request the <strong>desktop site</strong> from the browser menu, then follow the Gmail steps above.</li>
+    </ol>
+    <p class="note">Avoid tapping Forward in the app and sending it to the analyzer. An inline forward from the app replaces the original headers with your own, which weakens the verdict.</p>
+  </div>
+
+  <div class="provider" id="outlook-web">
+    <h2>Outlook.com and the new Outlook app</h2>
+    <ol>
+      <li>Open the suspicious email.</li>
+      <li>Click the <strong>three-dot menu</strong> at the top-right of the message.</li>
+      <li>Choose <strong>"Save as."</strong> The message downloads as a .eml file.</li>
+      <li>Upload that file to the <a href="/#analyzer">analyzer</a>.</li>
+    </ol>
+    <p class="note">No "Save as" option? From the same menu, look under <strong>View &gt; View message source</strong>, copy everything, and use the analyzer's "Paste the raw email source" option.</p>
+  </div>
+
+  <div class="provider" id="outlook-classic">
+    <h2>Classic Outlook (Windows desktop)</h2>
+    <p>
+      Heads up: dragging a message out of classic Outlook creates a <strong>.msg</strong> file, which is a
+      Microsoft-specific format the analyzer cannot read. Use one of these instead:
+    </p>
+    <ol>
+      <li><strong>Forward as attachment:</strong> select the message, then press <strong>Ctrl+Alt+F</strong> (or use the ribbon: <strong>More respond options &gt; Forward as Attachment</strong>). Send it to <code>check@fredsprivacy.com</code>. The original arrives with its headers intact.</li>
+      <li><strong>Or use Outlook on the web:</strong> sign in at <code>outlook.com</code> or <code>outlook.office.com</code>, find the same message, and follow the "Save as" steps in the section above to get a .eml file.</li>
+    </ol>
+  </div>
+
+  <div class="provider" id="apple-mail">
+    <h2>Apple Mail (Mac)</h2>
+    <ol>
+      <li>Click the suspicious email once in the message list to select it.</li>
+      <li><strong>Drag it out</strong> of Mail and drop it on your Desktop. That creates a .eml file. Done.</li>
+    </ol>
+    <p class="note">Prefer menus? With the message selected, choose <strong>File &gt; Save As</strong> and set the format to <strong>"Raw Message Source."</strong> Or choose <strong>Message &gt; Forward as Attachment</strong> and send it to <code>check@fredsprivacy.com</code>.</p>
+  </div>
+
+  <div class="provider" id="iphone-mail">
+    <h2>Mail on iPhone or iPad</h2>
+    <p>
+      Apple's iOS Mail app has no way to export the raw message or forward it as an attachment, so a
+      submission straight from the app will not carry the original headers.
+    </p>
+    <ol>
+      <li>If the account is Gmail, Outlook, or Yahoo, open that provider's <strong>website in your phone's browser</strong> (request the desktop site) and follow the matching section on this page.</li>
+      <li>Otherwise, handle it from a computer when you can. The email will still be there.</li>
+    </ol>
+  </div>
+
+  <div class="provider" id="yahoo">
+    <h2>Yahoo Mail</h2>
+    <ol>
+      <li>Open the suspicious email.</li>
+      <li>Click the <strong>three-dot menu</strong> in the message toolbar.</li>
+      <li>Choose <strong>"View raw message."</strong> A page of raw text opens.</li>
+      <li>Select all of it (<strong>Ctrl+A</strong>, then <strong>Ctrl+C</strong>; Cmd on Mac).</li>
+      <li>On the <a href="/#analyzer">analyzer</a>, click <strong>"Paste the raw email source instead"</strong> and paste it in.</li>
+    </ol>
+    <p class="note">Yahoo does not offer a clean .eml download, so the paste option is the way to go here.</p>
+  </div>
+
+  <div class="provider" id="proton">
+    <h2>Proton Mail</h2>
+    <ol>
+      <li>Open the suspicious email.</li>
+      <li>Click the <strong>three-dot menu</strong> in the message header.</li>
+      <li>Choose <strong>"Export"</strong> (on some layouts it is under <strong>More</strong>). A .eml file downloads.</li>
+      <li>Upload that file to the <a href="/#analyzer">analyzer</a>.</li>
+    </ol>
+  </div>
+
+  <div class="provider" id="thunderbird">
+    <h2>Thunderbird</h2>
+    <ol>
+      <li>Right-click the suspicious email in the message list.</li>
+      <li>Choose <strong>"Save As"</strong> (or select the message and press <strong>Ctrl+S</strong>).</li>
+      <li>Save it anywhere as a .eml file and upload it to the <a href="/#analyzer">analyzer</a>.</li>
+    </ol>
+  </div>
+
+  <h2>A few things to keep in mind</h2>
+  <ul>
+    <li><strong>Never click links or open attachments</strong> in the suspicious email while you are saving it. Every step above works without touching the message content.</li>
+    <li><strong>Screenshots do not work.</strong> A picture of an email contains none of the authentication evidence the analyzer needs.</li>
+    <li><strong>Inline forwards are second-best.</strong> A normal forward wraps the message in a new email from you, replacing the original headers. If you must forward, use a "forward as attachment" option when your mail app has one.</li>
+    <li><strong>Files must be under 500 KB.</strong> Most emails are far smaller. If yours is over, it probably has large attachments; the message itself is what matters.</li>
+    <li><strong>Redact anything sensitive first.</strong> Submitted emails are processed by cloud services. See the <a href="/privacy.html">Privacy Policy</a> for details.</li>
+  </ul>
+
+  <hr>
+  <p style="font-size:13px">
+    Menu names and locations change as mail providers update their apps. If a step does not match what you
+    see, look for anything labeled "Show original," "View source," "Save as," or "Export" on the individual message.
+  </p>
+
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <span>Fred's Privacy: a personal security engineering project.</span>
+    <a href="/">&larr; Back to analyzer</a>
+  </div>
+</footer>
+
+</body>
+</html>
