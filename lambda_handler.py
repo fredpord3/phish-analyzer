@@ -148,6 +148,28 @@ def handle_ses_event(event):
     record = event["Records"][0]["ses"]
     message_id = record["mail"]["messageId"]
     sender = record["mail"]["source"]
+    # Log the sender's domain, never the full address - consistent with the
+    # verdict-log and history policies of not persisting submitter addresses.
+    sender_domain = (sender or "").split("@")[-1].lower()
+
+    # Backscatter guard: if the submission itself hard-failed SPF, the envelope
+    # sender is unauthorized by that domain's own published DNS policy - the
+    # address is very likely forged. Replying would send unsolicited mail from
+    # our domain to the forged victim (backscatter), which is exactly the
+    # behavior that burns SES sender reputation. Drop silently, before the S3
+    # fetch and before any parsing, reputation, or model cost is incurred.
+    # SES receipt verdicts are PASS / FAIL / GRAY / PROCESSING_FAILED; only a
+    # hard FAIL is dropped. A missing or unparseable verdict fails open to
+    # analysis (the rate limiter still backstops), so a malformed event can
+    # never wedge legitimate mail.
+    spf_verdict = ""
+    try:
+        spf_verdict = (record.get("receipt", {}).get("spfVerdict", {}).get("status") or "").upper()
+    except Exception:
+        pass
+    if spf_verdict == "FAIL":
+        logger.info("Dropping hard SPF-fail submission from domain %s (backscatter guard)", sender_domain)
+        return {"statusCode": 200, "skipped": True, "reason": "spf_hard_fail"}
 
     raw = s3.get_object(Bucket=os.environ["BUCKET_NAME"], Key=f"inbound/{message_id}")["Body"].read()
     submission = email.message_from_bytes(raw, policy=policy.default)
@@ -155,9 +177,6 @@ def handle_ses_event(event):
     # Loop prevention: don't analyze our own replies, bounces, or auto-responders.
     # Without this, a reply that bounces or gets auto-replied to could trigger
     # another analysis, which sends another reply, creating an infinite loop.
-    # Log the sender's domain, never the full address - consistent with the
-    # verdict-log and history policies of not persisting submitter addresses.
-    sender_domain = (sender or "").split("@")[-1].lower()
 
     if is_loop_or_bounce(sender, submission):
         logger.info("Skipping submission from domain %s (loop/bounce/auto-responder)", sender_domain)
@@ -1634,11 +1653,11 @@ What we looked at:
   URLs found: {len(parsed['urls'])}
   Attachments: {len(parsed.get('attachments') or [])}
 
-Indicators:
-{indicators_txt}
-
 Recommendation:
   {verdict.get('recommendation','When in doubt, do not click links or reply.')}
+
+Indicators:
+{indicators_txt}
 
 ---
 This is an automated advisory analysis from Fred's Privacy, not a guarantee.
