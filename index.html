@@ -3,11 +3,16 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Fred's Privacy — AI Phishing Email Analyzer</title>
+<title>Fred's Privacy | AI Phishing Email Analyzer</title>
 <meta name="description" content="Drop in a suspicious email and get a verdict in seconds. Header authentication analysis, threat-intelligence link checks, and AI content review.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <style>
   :root{
     --bg:#0B0F14;            /* deep slate, not pure black */
@@ -42,7 +47,7 @@
   }
   a{color:var(--info);text-decoration:none}
   a:hover{text-decoration:underline}
-  a:focus-visible,button:focus-visible,label:focus-within,[tabindex]:focus-visible{
+  a:focus-visible,button:focus-visible,label:focus-within,[tabindex]:focus-visible,summary:focus-visible{
     outline:2px solid var(--accent);outline-offset:3px;border-radius:2px;
   }
   .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
@@ -159,7 +164,7 @@
     border-radius:12px;
     padding:28px 32px;
   }
-  .verdict-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+  .verdict-row{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:14px}
   .verdict-badge{
     font-family:var(--display);font-weight:700;
     font-size:clamp(17px,2.6vw,22px);
@@ -171,7 +176,11 @@
   .verdict-badge.suspicious,.verdict-badge.unknown{color:var(--warn);background:rgba(255,194,75,.08)}
   .verdict-badge.likely_phishing{color:var(--bad);background:rgba(255,92,92,.08)}
   .conf{font-family:var(--mono);font-size:13px;color:var(--text-dim);letter-spacing:.05em}
-  .summary{margin-bottom:18px;max-width:64ch;color:var(--text)}
+  .plain-verdict{
+    font-family:var(--display);font-weight:600;font-size:19px;
+    letter-spacing:-.01em;margin-bottom:8px;
+  }
+  .summary{margin-bottom:18px;max-width:64ch;color:var(--text-dim)}
   .chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:18px}
   .chip{
     font-family:var(--mono);font-size:12px;font-weight:500;
@@ -180,7 +189,7 @@
   }
   .chip.pass{border-color:rgba(61,220,132,.5);color:var(--ok)}
   .chip.fail{border-color:rgba(255,92,92,.5);color:var(--bad)}
-  table.indicators{width:100%;border-collapse:collapse;font-size:14px;margin-bottom:18px}
+  table.indicators{width:100%;border-collapse:collapse;font-size:14px;margin-bottom:6px}
   table.indicators td{border-top:1px solid var(--line);padding:10px 10px 10px 0;vertical-align:top;color:var(--text-dim)}
   table.indicators td strong{color:var(--text)}
   td.sev{font-family:var(--mono);font-size:11px;font-weight:600;white-space:nowrap;letter-spacing:.08em;padding-right:16px}
@@ -191,8 +200,26 @@
     border-left:3px solid var(--accent);
     padding:10px 16px;background:var(--accent-soft);
     font-size:15px;max-width:68ch;border-radius:0 6px 6px 0;
+    margin-bottom:4px;
   }
   .rec strong{color:var(--text)}
+  .history-note{font-size:14px;color:var(--text-dim);margin-top:12px;max-width:64ch}
+  details.tech{margin-top:18px;border-top:1px solid var(--line);padding-top:14px}
+  details.tech summary{
+    cursor:pointer;list-style:none;
+    display:flex;align-items:center;gap:10px;
+    font-family:var(--mono);font-size:12px;font-weight:600;
+    letter-spacing:.12em;text-transform:uppercase;color:var(--text-dim);
+    user-select:none;
+  }
+  details.tech summary::-webkit-details-marker{display:none}
+  details.tech summary::before{
+    content:"+";color:var(--accent);font-weight:600;font-size:14px;
+    width:14px;text-align:center;
+  }
+  details.tech[open] summary::before{content:"\2212"}
+  details.tech summary:hover{color:var(--text)}
+  details.tech .tech-body{margin-top:16px}
   .meta{font-family:var(--mono);font-size:11px;color:var(--text-dim);margin-top:16px;letter-spacing:.03em}
   .error-card{border-color:rgba(255,92,92,.5)}
   .error-card p{color:var(--bad);font-family:var(--mono);font-size:14px}
@@ -279,11 +306,12 @@
 
 <nav>
   <div class="wrap nav-inner">
-    <a class="brand" href="#top">FRED'S<span>/</span>PRIVACY</a>
+    <a class="brand" href="#top">FREDS<span>/</span>PRIVACY</a>
     <div class="nav-links">
       <a href="#coverage">What gets checked</a>
       <a href="#pipeline">How it runs</a>
-      <a href="https://github.com/fredpord3/phish-analyzer">GitHub</a>
+      <a href="/get-eml.html">Get a .eml file</a>
+      <a href="https://github.com/fredpord3/phish-analyzer" target="_blank" rel="noopener noreferrer">GitHub</a>
       <a class="btn" href="#analyzer">Check an email</a>
     </div>
   </div>
@@ -293,7 +321,7 @@
   <div class="wrap">
     <div class="eyebrow">/ AI phishing analysis</div>
     <h1>Not sure that email is real? Get a verdict.</h1>
-    <p class="lede">Drop in a suspicious email and this tool inspects what senders can't fake — <strong>SPF, DKIM, and DMARC authentication</strong> — checks every link against threat-intelligence databases, then has an AI read the content for social-engineering patterns. Verdict in about ten seconds.</p>
+    <p class="lede">Drop in a suspicious email and this tool inspects what senders can't fake: <strong>SPF, DKIM, and DMARC authentication</strong>. It checks every link against threat-intelligence databases, then has an AI read the content for social-engineering patterns. Verdict in about fifteen seconds.</p>
     <div class="hero-ctas">
       <a class="btn" href="#analyzer">Analyze an email</a>
       <a class="btn ghost" href="#pipeline">See how it works</a>
@@ -307,28 +335,32 @@
         <input type="file" id="fileInput" accept=".eml,message/rfc822,.txt">
       </label>
       <div class="alt-row">
+        <span>Not sure how to get the file?</span>
+        <a href="/get-eml.html">Step-by-step guide for Gmail, Outlook, and more</a>
+      </div>
+      <div class="alt-row">
         <span>No file?</span>
         <button class="linkish" id="pasteToggle" type="button">Paste the raw email source instead</button>
         <span>&middot;</span>
         <span>Or forward it to <a href="mailto:check@fredsprivacy.com">check@fredsprivacy.com</a></span>
       </div>
-      <textarea id="pasteBox" spellcheck="false" aria-label="Raw email source" placeholder="Paste the full raw source — headers included — from your mail app's 'Show original' / 'View source' option."></textarea>
+      <textarea id="pasteBox" spellcheck="false" aria-label="Raw email source" placeholder="Paste the full raw source, headers included, from your mail app's 'Show original' / 'View source' option."></textarea>
       <div class="actions" id="pasteActions">
         <button class="btn" id="analyzeBtn" type="button">Analyze email</button>
       </div>
       <div id="turnstileBox" class="turnstile-box" hidden></div>
       <div id="result" aria-live="polite"></div>
-      <p class="fineprint">The email you submit is processed by AWS and analyzed by Anthropic's Claude. Don't submit messages containing passwords, financial details, or personal data you wouldn't share with a cloud service. Results are advisory &mdash; when real money or credentials are at stake, verify with the sender through a channel you already trust.</p>
+      <p class="fineprint">The email you submit is processed by AWS and analyzed by Anthropic's Claude. Don't submit messages containing passwords, financial details, or personal data you wouldn't share with a cloud service. Results are advisory. When real money or credentials are at stake, verify with the sender through a channel you already trust.</p>
     </div>
   </div>
 </header>
 
 <div class="stats">
   <div class="wrap stats-inner">
-    <div class="stat"><b>~20s</b><span>typical time to verdict</span></div>
+    <div class="stat"><b>~15s</b><span>typical time to verdict</span></div>
     <div class="stat"><b>3</b><span>threat-intel feeds: VirusTotal, urlscan.io, PhishTank</span></div>
-    <div class="stat"><b>2</b><span>AI models &mdash; fast first pass, stronger second opinion</span></div>
-    <div class="stat"><b>86</b><span>automated tests behind every deploy</span></div>
+    <div class="stat"><b>2</b><span>AI models: fast first pass, stronger second opinion</span></div>
+    <div class="stat"><b>113</b><span>automated tests behind every deploy</span></div>
   </div>
 </div>
 
@@ -346,12 +378,12 @@
       <div class="feature">
         <div class="slash">/ Links</div>
         <h3>URL &amp; domain reputation</h3>
-        <p>Every URL is extracted &mdash; including ones hidden in HTML &mdash; and checked for shorteners, IP-literal hosts, anchor-text bait, homoglyph lookalikes of major brands, and known-malicious reputation in VirusTotal, urlscan.io, and PhishTank.</p>
+        <p>Every URL is extracted, including ones hidden in HTML, and checked for shorteners, IP-literal hosts, anchor-text bait, homoglyph lookalikes of major brands, and known-malicious reputation in VirusTotal, urlscan.io, and PhishTank.</p>
       </div>
       <div class="feature">
         <div class="slash">/ Content</div>
         <h3>AI intent review</h3>
-        <p>An AI model reads the message for the patterns humans fall for: manufactured urgency, authority impersonation, credential prompts, and payment redirection &mdash; grounded in the header facts, not overruled by them.</p>
+        <p>An AI model reads the message for the patterns humans fall for: manufactured urgency, authority impersonation, credential prompts, and payment redirection, grounded in the header facts, not overruled by them.</p>
       </div>
     </div>
   </div>
@@ -364,10 +396,10 @@
     <p class="section-lede">Serverless end to end: your email enters via SES or this page's upload, and one Lambda function runs the whole pipeline.</p>
     <div class="pipe">
       <div class="step"><h3>Ingest</h3><p>Email arrives via SES or the web upload. Rate limits and loop protection run before anything else touches it.</p></div>
-      <div class="step"><h3>Parse</h3><p>Headers, body, and every URL are extracted &mdash; from plain text and from HTML anchor tags where phishing kits hide targets.</p></div>
+      <div class="step"><h3>Parse</h3><p>Headers, body, and every URL are extracted from plain text and from HTML anchor tags where phishing kits hide targets.</p></div>
       <div class="step"><h3>Enrich</h3><p>SPF/DKIM/DMARC weighting, sender-alignment checks, lookalike-domain detection, and threat-intel lookups produce hard signals.</p></div>
       <div class="step"><h3>Analyze</h3><p>Claude Haiku reads content against the hard signals; uncertain verdicts escalate to Claude Sonnet for a second opinion.</p></div>
-      <div class="step"><h3>Verdict</h3><p>A structured verdict &mdash; tier, confidence, indicators, recommendation &mdash; returns by email reply or right here as JSON.</p></div>
+      <div class="step"><h3>Verdict</h3><p>A structured verdict (tier, confidence, indicators, recommendation) returns by email reply or right here as JSON.</p></div>
     </div>
     <p class="pipe-note">SES &rarr; S3 &rarr; <b>Lambda</b> (Python 3.13) &rarr; header analysis + URL reputation + <b>Claude Haiku 4.5 / Sonnet</b> &rarr; verdict &rarr; reply / JSON &rarr; CloudWatch telemetry</p>
   </div>
@@ -383,9 +415,10 @@
   <div class="wrap">
     <span>Built by Fred Pordum as a serverless security engineering project.</span>
     <span style="display:flex;gap:20px;flex-wrap:wrap">
+      <a href="/get-eml.html">Get a .eml file</a>
       <a href="/privacy.html">Privacy</a>
       <a href="/terms.html">Terms</a>
-      <a href="https://github.com/fredpord3/phish-analyzer">Source on GitHub &rarr;</a>
+      <a href="https://github.com/fredpord3/phish-analyzer" target="_blank" rel="noopener noreferrer">Source on GitHub &rarr;</a>
     </span>
   </div>
 </footer>
@@ -394,7 +427,7 @@
 const API_URL = "https://juxw3ch37vtkkuzfzslortfqna0vpbek.lambda-url.us-east-1.on.aws/";
 
 // Cloudflare Turnstile (optional). Paste your SITE key here after creating a
-// widget at dash.cloudflare.com -> Turnstile. Leave empty ("") to disable —
+// widget at dash.cloudflare.com -> Turnstile. Leave empty ("") to disable;
 // the page works exactly as before. The SECRET key goes in the Lambda's
 // TURNSTILE_SECRET_KEY env var, never in this file.
 const TURNSTILE_SITE_KEY = "0x4AAAAAADvyTYX8mZY0jGuJ";
@@ -448,12 +481,12 @@ fileInput.addEventListener("change", () => {
 });
 analyzeBtn.addEventListener("click", () => {
   const text = pasteBox.value.trim();
-  if (!text) { showError("Paste the raw email source first — headers and all."); return; }
+  if (!text) { showError("Paste the raw email source first, headers and all."); return; }
   analyze(text);
 });
 
 function readAndAnalyze(file) {
-  if (file.size > 500000) { showError("That file is over the 500 KB limit. Most emails are far smaller — make sure you saved the message itself, not an export with attachments."); return; }
+  if (file.size > 500000) { showError("That file is over the 500 KB limit. Most emails are far smaller. Make sure you saved the message itself, not an export with attachments."); return; }
   const reader = new FileReader();
   reader.onload = () => analyze(reader.result);
   reader.onerror = () => showError("Couldn't read that file. Try saving the email again as .eml.");
@@ -462,7 +495,7 @@ function readAndAnalyze(file) {
 
 async function analyze(rawEmail) {
   if (!API_URL) {
-    showError("This page isn't wired to the analyzer yet — set API_URL in the page source to your Lambda Function URL. You can still forward emails to check@fredsprivacy.com.");
+    showError("This page isn't wired to the analyzer yet. Set API_URL in the page source to your Lambda Function URL. You can still forward emails to check@fredsprivacy.com.");
     return;
   }
   setBusy(true);
@@ -487,14 +520,14 @@ async function analyze(rawEmail) {
     let data = null;
     try { data = await resp.json(); } catch (_) {}
     if (resp.status === 429) { showError("You've hit the hourly limit from this connection. Try again in an hour."); return; }
-    if (resp.status === 403) { showError((data && data.error) || "Human verification failed — complete the checkbox and try again."); return; }
+    if (resp.status === 403) { showError((data && data.error) || "Human verification failed. Complete the checkbox and try again."); return; }
     if (!resp.ok) { showError((data && data.error) || "The analyzer couldn't process that. Check that you uploaded the original .eml with headers intact."); return; }
     renderVerdict(data);
   } catch (_) {
     showError("Couldn't reach the analyzer. Check your connection and try again.");
   } finally {
     setBusy(false);
-    // Turnstile tokens are single-use — reset so the next analysis gets a fresh one.
+    // Turnstile tokens are single-use. Reset so the next analysis gets a fresh one.
     if (TURNSTILE_SITE_KEY && window.turnstile && turnstileWidgetId !== null) {
       try { turnstile.reset(turnstileWidgetId); } catch (_) {}
     }
@@ -526,15 +559,44 @@ function chip(label, value) {
   return '<span class="chip ' + cls + '">' + esc(label) + ": " + esc(value || "none") + "</span>";
 }
 
+// Result card reads simple-to-advanced: plain verdict and the "What to do"
+// action up front, technical evidence collapsed behind a <details> toggle.
 function renderVerdict(d) {
   const v = d.verdict || "unknown";
   const badgeText = { likely_phishing: "Likely phishing", suspicious: "Suspicious",
                       likely_legitimate: "Likely legitimate", unknown: "Inconclusive" }[v] || "Inconclusive";
+  // One fixed plain-English line per tier: the instant read for someone who
+  // won't scan chips or tables. Claude's summary carries the specifics below.
+  const plainLine = {
+    likely_phishing:   "This looks like a scam.",
+    suspicious:        "Something's off about this one.",
+    likely_legitimate: "This email checks out.",
+    unknown:           "We couldn't tell either way."
+  }[v] || "We couldn't tell either way.";
   const a = d.analyzed || {};
   const rows = (d.indicators || []).map(i =>
     "<tr><td class='sev " + esc((i.severity || "low").toLowerCase()) + "'>" +
     esc((i.severity || "?").toUpperCase()) + "</td><td><strong>" + esc(i.signal || "") +
-    "</strong> — " + esc(i.detail || "") + "</td></tr>").join("");
+    "</strong>: " + esc(i.detail || "") + "</td></tr>").join("");
+
+  const historyNote = (d.history && d.history.prior_lookups > 0)
+    ? '<p class="history-note">You\'ve checked this sender ' +
+      esc(d.history.prior_lookups) + (d.history.prior_lookups === 1 ? " time" : " times") + " before" +
+      (d.history.last_verdict ? "; last verdict: " + esc(String(d.history.last_verdict).replace(/_/g, " ")) : "") + ".</p>"
+    : "";
+
+  // Everything technical lives behind the toggle: auth chips, link/attachment
+  // counts, and the full indicators table. Native <details> keeps it
+  // keyboard- and screen-reader-accessible with zero JS.
+  const techBody =
+    '<div class="tech-body">' +
+      '<div class="chips">' +
+        chip("DMARC", a.dmarc) + chip("DKIM", a.dkim) + chip("SPF", a.spf) +
+        '<span class="chip">links found: ' + esc(a.url_count ?? 0) + "</span>" +
+        (a.attachment_count ? '<span class="chip">attachments: ' + esc(a.attachment_count) + "</span>" : "") +
+      "</div>" +
+      (rows ? '<table class="indicators"><tbody>' + rows + "</tbody></table>" : "") +
+    "</div>";
 
   result.style.display = "block";
   result.innerHTML =
@@ -543,19 +605,14 @@ function renderVerdict(d) {
         '<span class="verdict-badge ' + esc(v) + '">' + esc(badgeText) + '</span>' +
         '<span class="conf">' + esc(d.confidence ?? 0) + '% confidence</span>' +
       '</div>' +
+      '<p class="plain-verdict">' + esc(plainLine) + '</p>' +
       '<p class="summary">' + esc(d.summary || "") + "</p>" +
-      '<div class="chips">' +
-        chip("DMARC", a.dmarc) + chip("DKIM", a.dkim) + chip("SPF", a.spf) +
-        '<span class="chip">links found: ' + esc(a.url_count ?? 0) + "</span>" +
-        (a.attachment_count ? '<span class="chip">attachments: ' + esc(a.attachment_count) + "</span>" : "") +
-      "</div>" +
-      (d.history && d.history.prior_lookups > 0
-        ? '<p class="summary" style="margin-top:10px;font-size:14px;color:var(--text-dim)">You\'ve checked this sender ' +
-          esc(d.history.prior_lookups) + (d.history.prior_lookups === 1 ? " time" : " times") + " before" +
-          (d.history.last_verdict ? " — last verdict: " + esc(String(d.history.last_verdict).replace(/_/g, " ")) : "") + ".</p>"
-        : "") +
-      (rows ? '<table class="indicators"><tbody>' + rows + "</tbody></table>" : "") +
       '<div class="rec"><strong>What to do:</strong> ' + esc(d.recommendation || "When in doubt, don't click links or reply.") + "</div>" +
+      historyNote +
+      '<details class="tech">' +
+        '<summary>Show the technical evidence</summary>' +
+        techBody +
+      '</details>' +
       '<p class="meta">analyzed: ' + esc(a.from || "unknown sender") + ' · "' + esc(a.subject || "") + '"' +
       (d.escalated ? " · escalated to a stronger model for a second read" : "") +
       " · advisory only, not a guarantee</p>" +
