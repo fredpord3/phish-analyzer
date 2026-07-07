@@ -27,6 +27,7 @@ Two entry paths, one pipeline:
 
 - **Rate limiting**: 10 analyses/hour per sender email (SES) or source IP (HTTP), atomic DynamoDB counters with TTL, fail-open so an AWS blip never blocks legitimate mail.
 - **Turnstile CAPTCHA (optional)**: when `TURNSTILE_SECRET_KEY` is set, the web path requires a valid Cloudflare Turnstile token in the `X-Turnstile-Token` header, verified server-side against Cloudflare's siteverify endpoint. Runs before the rate limiter so failed bots never burn a NAT'd office's shared budget, and rejects before any model cost is incurred. Fails open only if Cloudflare itself is unreachable (the rate limiter still backstops). The SES path is never gated; CAPTCHA only makes sense for browsers.
+- **Backscatter guard**: a submission that hard-fails SPF on arrival (per the SES receipt verdict) is dropped silently before the S3 fetch, so a forged envelope sender never triggers a reply to the forged victim and never incurs storage, parsing, or model cost. GRAY and PROCESSING_FAILED verdicts still get analyzed; only a hard FAIL is dropped, and a missing verdict fails open so a malformed event cannot wedge legitimate mail.
 - **Loop/bounce protection**: our own replies, mailer-daemon/postmaster senders, RFC 3834 auto-responders, and bulk-precedence mail are dropped before analysis. `no-reply@` senders are deliberately not blocked (that's most of the legitimate mail people actually want checked).
 - **Hostile-input hardening**: unknown charsets, malformed .eml attachments, header injection via RFC 2047 subjects, CR/LF sequences in echoed reply subjects, and sloppy model JSON all degrade gracefully instead of crashing the reply path or opening an injection vector.
 
@@ -80,7 +81,7 @@ Optional:
 python -m pytest test_lambda_handler.py -v
 ```
 
-113 tests (106 unittest-style + 7 pytest-style hardening regressions) covering parsing, auth-signal weighting, leet and Unicode homoglyph lookalikes (including punycode senders), link mismatches, URL and attachment reputation with caching and short-circuiting, Turnstile gating, rate limiting, submitter history, escalation logic, both entry paths, prompt content (Received chain, injection hardening), and hostile-input regressions including duplicate auth headers, HTML-only bodies, and CR/LF reply-subject header injection. All external services (DynamoDB, SES, S3, the Claude API, and HTTP reputation calls) are mocked; the suite runs offline in under 3 seconds.
+115 tests (108 unittest-style + 7 pytest-style hardening regressions) covering parsing, auth-signal weighting, leet and Unicode homoglyph lookalikes (including punycode senders), link mismatches, URL and attachment reputation with caching and short-circuiting, Turnstile gating, rate limiting, the backscatter guard, submitter history, escalation logic, both entry paths, prompt content (Received chain, injection hardening), and hostile-input regressions including duplicate auth headers, HTML-only bodies, and CR/LF reply-subject header injection. All external services (DynamoDB, SES, S3, the Claude API, and HTTP reputation calls) are mocked; the suite runs offline in under 3 seconds.
 
 Run with pytest, not `python test_lambda_handler.py`: the hardening tests at the bottom are pytest-style functions that `unittest.main()` would silently skip.
 
@@ -127,6 +128,7 @@ Frontend. Set `ALLOWED_ORIGIN` to your canonical origin (`https://www.fredspriva
 - [x] Leet/digit lookalike heuristic + expanded brand watchlist (48 brands)
 - [x] Punycode-aware Unicode homoglyph detection (ASCII-skeleton rewrite with dedicated test coverage)
 - [x] Prompt injection hardening and reply-path header-injection regressions
+- [x] SPF hard-fail backscatter guard on the SES path
 - [ ] SES production access (operational: AWS console request, not code)
 - [ ] Review escalation-rate telemetry after 30 days of production traffic
 
