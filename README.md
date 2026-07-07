@@ -6,6 +6,22 @@ Built by Fred Pordum as a security engineering project. The design principle: de
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    A[Email via SES] --> S3[(S3)]
+    B[Web upload<br>fredsprivacy.com] --> FURL[Lambda Function URL]
+    S3 --> L[Lambda - Python 3.13]
+    FURL --> L
+    L --> P[Parse<br>headers, body, URLs, attachments]
+    P --> E[Enrich<br>SPF/DKIM/DMARC, lookalikes,<br>link mismatches, threat intel]
+    E --> M[Claude Haiku 4.5<br>escalates to Sonnet 4.6]
+    M --> V[Structured verdict]
+    V --> R1[SES email reply]
+    V --> R2[JSON to browser]
+    V --> CW[CloudWatch PHISH_VERDICT telemetry]
+    L <--> D[(DynamoDB<br>rate limits, caches, history)]
+```
+
 Two entry paths, one pipeline:
 
 - **SES path**: email arrives at check@fredsprivacy.com, SES drops the raw .eml in S3 and triggers the Lambda, which parses, enriches, analyzes, and replies by email.
