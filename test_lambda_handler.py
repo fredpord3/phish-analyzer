@@ -6,9 +6,10 @@ the bottom are pytest functions that unittest.main() would silently skip):
 
     python -m pytest test_lambda_handler.py -v
 
-Expected: 113 passed (106 unittest-style + 7 pytest-style hardening regressions).
+Expected: 115 passed (108 unittest-style + 7 pytest-style hardening regressions).
 Covers: parsing, enrichment, URL + attachment reputation, escalation, both
-entry paths, Turnstile CAPTCHA gating, leet + Unicode homoglyph lookalikes
+entry paths, Turnstile CAPTCHA gating, the SPF hard-fail backscatter guard,
+leet + Unicode homoglyph lookalikes
 (including punycode senders), submitter history, the 2026-07-07 review
 regressions (duplicate auth headers, URL punctuation strip, reputation
 short-circuit, frozenset brand list, HTML body fallback, received chain in
@@ -390,6 +391,32 @@ class TestSesPath(BaseTest):
         kwargs = lh.ses.send_email.call_args.kwargs
         self.assertEqual(kwargs["Destination"]["ToAddresses"], ["alice@example.com"])
         self.assertIn("LIKELY LEGITIMATE", kwargs["Message"]["Body"]["Text"]["Data"])
+
+    def test_spf_hard_fail_dropped_before_any_cost(self):
+        """Backscatter guard: a submission whose envelope sender hard-failed SPF
+        is very likely forged, so replying would spray unsolicited mail at the
+        forged victim from our domain. Must drop silently BEFORE the S3 fetch,
+        proving zero storage/parse/model cost is incurred for forged mail."""
+        self._stub_s3(PLAIN_EML)
+        event = self._event("victim@forged.example")
+        event["Records"][0]["ses"]["receipt"] = {"spfVerdict": {"status": "FAIL"}}
+        result = lh.lambda_handler(event, None)
+        self.assertEqual(result["reason"], "spf_hard_fail")
+        self.assertTrue(result["skipped"])
+        lh.ses.send_email.assert_not_called()
+        lh.s3.get_object.assert_not_called()
+
+    def test_spf_gray_still_analyzed_and_replied(self):
+        """Only a hard FAIL is dropped. GRAY (SES's soft/indeterminate verdict)
+        must proceed to full analysis and a reply - punishing indeterminate
+        SPF would silently eat mail from misconfigured-but-real senders."""
+        self._stub_s3(PLAIN_EML)
+        event = self._event()
+        event["Records"][0]["ses"]["receipt"] = {"spfVerdict": {"status": "GRAY"}}
+        result = lh.lambda_handler(event, None)
+        self.assertEqual(result["statusCode"], 200)
+        self.assertNotIn("skipped", result)
+        lh.ses.send_email.assert_called_once()
 
     def test_own_domain_skipped(self):
         self._stub_s3(PLAIN_EML)
