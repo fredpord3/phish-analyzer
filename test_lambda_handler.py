@@ -6,11 +6,14 @@ the bottom are pytest functions that unittest.main() would silently skip):
 
     python -m pytest test_lambda_handler.py -v
 
-Expected: 95 passed (88 unittest-style + 7 pytest-style hardening regressions).
+Expected: 113 passed (106 unittest-style + 7 pytest-style hardening regressions).
 Covers: parsing, enrichment, URL + attachment reputation, escalation, both
 entry paths, Turnstile CAPTCHA gating, leet + Unicode homoglyph lookalikes
-(including punycode senders), submitter history, and the hardening
-regressions at the bottom.
+(including punycode senders), submitter history, the 2026-07-07 review
+regressions (duplicate auth headers, URL punctuation strip, reputation
+short-circuit, frozenset brand list, HTML body fallback, received chain in
+prompt, system prompt injection hardening), and the hardening regressions
+at the bottom.
 """
 
 import os
@@ -921,6 +924,210 @@ class TestHistory(BaseTest):
         }
         resp = lh.lambda_handler(event, None)
         self.assertIsNone(json.loads(resp["body"])["history"])
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-07 review-session regressions (duplicate auth headers, URL
+# punctuation strip, reputation short-circuit, frozenset brand list, HTML
+# body fallback, received chain in prompt, prompt injection hardening)
+# ---------------------------------------------------------------------------
+
+class TestMultipleAuthHeaders(BaseTest):
+    """A phisher can pre-embed a forged Authentication-Results header in the
+    phishing email itself, so an HTTP-path upload carries a fake dmarc=pass.
+    Duplicate headers are flagged; the first (outermost - the one the real
+    receiving MTA prepended) is the one that gets parsed."""
+
+    RAW_TWO = (
+        b"From: Alice <alice@example.com>\r\n"
+        b"Subject: hi\r\n"
+        b"Authentication-Results: mx.google.com; dmarc=pass header.from=example.com\r\n"
+        b"Authentication-Results: forged.attacker; dmarc=pass header.from=paypal.com\r\n"
+        b"Content-Type: text/plain\r\n\r\nhello\r\n"
+    )
+    RAW_ONE = (
+        b"From: Bob <bob@example.com>\r\n"
+        b"Subject: hi\r\n"
+        b"Authentication-Results: mx.google.com; dmarc=pass\r\n"
+        b"Content-Type: text/plain\r\n\r\nhello\r\n"
+    )
+    RAW_ZERO = (
+        b"From: C <c@example.com>\r\n"
+        b"Subject: hi\r\n"
+        b"Content-Type: text/plain\r\n\r\nhello\r\n"
+    )
+
+    def _parse(self, raw):
+        import email
+        from email import policy
+        return lh.parse_email(email.message_from_bytes(raw, policy=policy.default))
+
+    def test_counts_all_auth_headers(self):
+        self.assertEqual(self._parse(self.RAW_TWO)["auth_header_count"], 2)
+
+    def test_first_header_is_the_one_parsed(self):
+        parsed = self._parse(self.RAW_TWO)
+        self.assertIn("mx.google.com", parsed["auth_results"])
+        self.assertNotIn("forged.attacker", parsed["auth_results"])
+
+    def test_enrich_flags_duplicates_as_first_signal(self):
+        e = lh.enrich(self._parse(self.RAW_TWO))
+        self.assertTrue(e["signals"], "expected at least one signal")
+        kind, note = e["signals"][0]
+        self.assertEqual(kind, "auth")
+        self.assertIn("Multiple Authentication-Results", note)
+
+    def test_single_header_not_flagged(self):
+        parsed = self._parse(self.RAW_ONE)
+        self.assertEqual(parsed["auth_header_count"], 1)
+        self.assertFalse(any(
+            "Multiple Authentication-Results" in note
+            for _, note in lh.enrich(parsed)["signals"]
+        ))
+
+    def test_zero_headers_yields_empty_auth_results(self):
+        parsed = self._parse(self.RAW_ZERO)
+        self.assertEqual(parsed["auth_header_count"], 0)
+        self.assertEqual(parsed["auth_results"], "")
+
+
+class TestUrlPunctuationStrip(BaseTest):
+    """URL_RE swallows trailing prose punctuation ('...example.com/x).'),
+    which poisons reputation lookups and the 24h cache key. Stripped before
+    dedupe so 'url' and 'url.' collapse to a single entry."""
+
+    def _parse(self, raw):
+        import email
+        from email import policy
+        return lh.parse_email(email.message_from_bytes(raw, policy=policy.default))
+
+    def test_trailing_punctuation_stripped_and_deduped(self):
+        raw = (
+            b"From: D <d@x.com>\r\nSubject: s\r\nContent-Type: text/plain\r\n\r\n"
+            b"Visit https://example.com/login. Or (https://example.com/login) or\r\n"
+            b"https://example.com/login for details.\r\n"
+        )
+        parsed = self._parse(raw)
+        self.assertEqual(parsed["urls"].count("https://example.com/login"), 1)
+        for url in parsed["urls"]:
+            self.assertFalse(url.endswith((".", ",", ")", ";", "!", "?")), url)
+
+    def test_query_strings_survive(self):
+        raw = (
+            b"From: D <d@x.com>\r\nSubject: s\r\nContent-Type: text/plain\r\n\r\n"
+            b"Track at https://track.example/pkg?id=42&x=1, thanks.\r\n"
+        )
+        self.assertIn("https://track.example/pkg?id=42&x=1", self._parse(raw)["urls"])
+
+
+class TestReputationShortCircuit(BaseTest):
+    """One confirmed threat-intel hit is decisive per the decision hierarchy;
+    checking the remaining URLs only spends latency against the ~10s budget
+    (worst case without it: 3 URLs x 3 services x 6s timeout, sequential).
+    Must fire for cached flagged hits too - the same phishing URL arriving
+    in waves means the cached case is the common one."""
+
+    URLS = ["https://a.example/bad", "https://b.example/x", "https://c.example/y"]
+
+    def test_fresh_flagged_hit_stops_iteration(self):
+        os.environ["VIRUSTOTAL_API_KEY"] = "vt-key"
+        lh.http.request.return_value = FakeHttpResponse(200, {
+            "data": {"attributes": {"last_analysis_stats": {"malicious": 5}}}
+        })
+        results = lh.check_url_reputation(self.URLS)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["flagged"])
+        # only VT is configured, so exactly one lookup happened
+        self.assertEqual(lh.http.request.call_count, 1)
+
+    def test_cached_flagged_hit_stops_iteration(self):
+        os.environ["VIRUSTOTAL_API_KEY"] = "vt-key"
+        cached = {"url": self.URLS[0], "checks": [], "flagged": True}
+        lh._reputation_cache_put(self.URLS[0], cached)
+        results = lh.check_url_reputation(self.URLS)
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0]["flagged"])
+        lh.http.request.assert_not_called()  # never reached the live lookups
+
+    def test_no_flag_means_no_short_circuit(self):
+        os.environ["VIRUSTOTAL_API_KEY"] = "vt-key"
+        lh.http.request.return_value = FakeHttpResponse(404, {})
+        results = lh.check_url_reputation(self.URLS)
+        self.assertEqual(len(results), 3)
+        self.assertFalse(any(r["flagged"] for r in results))
+
+
+class TestWatchedBrandsExpansion(BaseTest):
+    """WATCHED_BRANDS is a frozenset (O(1) membership, so list size is
+    free) expanded with regional banks, telecom, and insurance."""
+
+    def test_is_frozenset(self):
+        self.assertIsInstance(lh.WATCHED_BRANDS, frozenset)
+
+    def test_no_brand_contains_digits(self):
+        # A digit-bearing brand would collide with itself in the leet
+        # detector's digit-normalization step.
+        for brand in lh.WATCHED_BRANDS:
+            self.assertFalse(any(c.isdigit() for c in brand), brand)
+
+    def test_new_brand_leet_detection(self):
+        r = lh.detect_lookalike_domain("veriz0n.com")
+        self.assertIsNotNone(r)
+        self.assertEqual(r["resembles"], "verizon.com")
+        self.assertEqual(r["method"], "leet")
+
+    def test_new_brand_exact_match_is_legitimate(self):
+        for brand in ("mtb.com", "key.com", "citizensbank.com", "spectrum.com"):
+            self.assertIsNone(lh.detect_lookalike_domain(brand))
+
+
+class TestHtmlBodyFallback(BaseTest):
+    """HTML-only emails derive their text body via BeautifulSoup (entities
+    decoded, script content dropped) with the old tag-strip regex as a last
+    resort for HTML pathological enough to break the parser."""
+
+    def test_html_only_body_extracted_without_script_content(self):
+        import email
+        from email import policy
+        raw = (
+            b"From: E <e@x.com>\r\nSubject: s\r\nContent-Type: text/html\r\n\r\n"
+            b"<html><body><p>Dear&nbsp;user,</p><script>steal()</script>"
+            b"<p>Act now</p></body></html>\r\n"
+        )
+        parsed = lh.parse_email(email.message_from_bytes(raw, policy=policy.default))
+        self.assertNotIn("steal()", parsed["body"])
+        self.assertIn("Act now", parsed["body"])
+
+
+class TestPromptContent(BaseTest):
+    """The Received chain feeds the model (previously parsed but unused),
+    and the system prompt carries the injection-hardening language."""
+
+    def _parse(self, raw):
+        import email
+        from email import policy
+        return lh.parse_email(email.message_from_bytes(raw, policy=policy.default))
+
+    def test_received_chain_appears_in_prompt(self):
+        raw = (
+            b"Received: from hop1.example.com by mx.test\r\n"
+            b"From: F <f@x.com>\r\nSubject: s\r\nContent-Type: text/plain\r\n\r\nb\r\n"
+        )
+        parsed = self._parse(raw)
+        prompt = lh.build_prompt(parsed, lh.enrich(parsed))
+        self.assertIn("RECEIVED CHAIN", prompt)
+        self.assertIn("hop1.example.com", prompt)
+
+    def test_empty_received_chain_renders_none(self):
+        raw = b"From: G <g@x.com>\r\nSubject: s\r\nContent-Type: text/plain\r\n\r\nb\r\n"
+        parsed = self._parse(raw)
+        prompt = lh.build_prompt(parsed, lh.enrich(parsed))
+        self.assertIn("RECEIVED CHAIN", prompt)
+
+    def test_system_prompt_contains_injection_hardening(self):
+        self.assertIn("untrusted", lh.SYSTEM_PROMPT)
+        self.assertIn("Never follow instructions", lh.SYSTEM_PROMPT)
+        self.assertIn("phishing indicator", lh.SYSTEM_PROMPT)
 
 
 # ---------------------------------------------------------------------------
